@@ -1,0 +1,126 @@
+{{template "layout" .}}
+
+{{define "title"}}{{if .IsNew}}New App{{else}}Edit {{.App.Name}}{{end}} — apphive{{end}}
+{{define "nav-apps"}}active{{end}}
+
+{{define "content"}}
+{{$app := .App}}
+<div class="container page">
+  <div class="page-header">
+    <div class="d-flex align-center gap-3">
+      <a href="/" class="btn btn-ghost btn-sm">← Back</a>
+      <h1 class="page-title">{{if .IsNew}}New App{{else}}Edit {{$app.Name}}{{end}}</h1>
+    </div>
+  </div>
+
+  <div style="max-width: 640px">
+    {{if .Errors}}
+    <div class="form-errors">
+      {{range .Errors}}
+      <div class="form-error-item">{{.}}</div>
+      {{end}}
+    </div>
+    {{end}}
+
+    <div class="card">
+      <div class="card-body">
+        <form method="POST" action="{{if .IsNew}}/apps{{else}}/apps/{{$app.ID}}{{end}}">
+          <!-- Name -->
+          <div class="form-group">
+            <label class="form-label" for="name">Name <span style="color:var(--red)">*</span></label>
+            <input id="name" type="text" name="name" class="form-control" value="{{$app.Name}}" placeholder="my-proxy" autofocus required>
+          </div>
+
+          <!-- Image -->
+          <div class="form-group">
+            <label class="form-label" for="image_ref">Image Reference <span style="color:var(--red)">*</span></label>
+            <input id="image_ref" type="text" name="image_ref" class="form-control" value="{{$app.ImageRef}}" placeholder="ghcr.io/user/myapp:latest" required>
+            <p class="form-hint">Docker Hub, GHCR, or any OCI-compatible registry.</p>
+          </div>
+
+          <!-- Entrypoint -->
+          <div class="form-group">
+            <label class="form-label" for="entrypoint">Entrypoint override</label>
+            <input id="entrypoint" type="text" name="entrypoint" class="form-control" value="{{range $app.Entrypoint}}{{.}} {{end}}" placeholder="/bin/sh -c">
+            <p class="form-hint">Space-separated. Leave blank to use the image default (set after pull).</p>
+          </div>
+
+          <!-- Command -->
+          <div class="form-group">
+            <label class="form-label" for="command">Command override</label>
+            <input id="command" type="text" name="command" class="form-control" value="{{range $app.Command}}{{.}} {{end}}" placeholder="./server --port 8080">
+            <p class="form-hint">Space-separated. Appended after entrypoint.</p>
+          </div>
+
+          <!-- Exposed Port -->
+          <div class="form-group">
+            <label class="form-label" for="exposed_port">Exposed Port</label>
+            <input id="exposed_port" type="number" name="exposed_port" class="form-control" value="{{if $app.ExposedPort}}{{$app.ExposedPort}}{{end}}" placeholder="8080" min="1" max="65535">
+            <p class="form-hint">Informational only — shown as a clickable link. Also used for health checks.</p>
+          </div>
+
+          <!-- Health Endpoint -->
+          <div class="form-group">
+            <label class="form-label" for="health_endpoint">Health Check Path</label>
+            <input id="health_endpoint" type="text" name="health_endpoint" class="form-control" value="{{$app.HealthEndpoint}}" placeholder="/health">
+            <p class="form-hint">Optional. Dashboard pings <code>http://localhost:&lt;port&gt;&lt;path&gt;</code> every 15 s.</p>
+          </div>
+
+          <!-- Auto-start -->
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" name="auto_start" {{if $app.AutoStart}}checked{{end}}>
+              Auto-start on dashboard boot
+            </label>
+            <p class="form-hint" style="margin-left:23px">Only applies when the rootfs exists (i.e. image was pulled).</p>
+          </div>
+
+          <!-- Prune after start -->
+          <div class="form-group">
+            <label class="form-check">
+              <input type="checkbox" name="prune_after_start" {{if $app.PruneAfterStart}}checked{{end}}>
+              Delete rootfs after app starts <span class="tag" style="margin-left:4px">free-tier</span>
+            </label>
+            <p class="form-hint" style="margin-left:23px">
+              Deletes the extracted image filesystem 3 s after a successful start to reclaim disk space.
+              The running process is unaffected (Linux keeps loaded files). The app <strong>cannot be restarted</strong>
+              without re-pulling — enable only if storage is scarce.
+            </p>
+          </div>
+
+          <hr class="divider">
+
+          <!-- Env Vars -->
+          <div class="form-group">
+            <div class="d-flex align-center" style="justify-content:space-between; margin-bottom:10px">
+              <label class="form-label" style="margin:0">Environment Variables</label>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="addEnvRow()">+ Add var</button>
+            </div>
+            <div id="env-list" class="env-list">
+              {{range $app.EnvVars}}
+              <div class="env-row">
+                <input type="text" name="env_key" class="form-control env-key" value="{{.Key}}" placeholder="KEY">
+                <input type="text" name="env_value" class="form-control env-value" value="{{.Value}}" placeholder="value">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.env-row').remove()">✕</button>
+              </div>
+              {{end}}
+            </div>
+            <p class="form-hint mt-2">These are the <em>only</em> env vars the process receives — no parent env inheritance.</p>
+          </div>
+
+          {{if not .IsNew}}
+          <p class="form-hint" style="color:var(--yellow)">
+            ⚠ Changes to env vars apply on next restart.
+          </p>
+          {{end}}
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-primary">{{if .IsNew}}Create App{{else}}Save Changes{{end}}</button>
+            <a href="{{if .IsNew}}/{{else}}/apps/{{$app.ID}}{{end}}" class="btn btn-ghost">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}

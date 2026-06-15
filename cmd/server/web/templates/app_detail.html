@@ -1,0 +1,182 @@
+{{template "layout" .}}
+
+{{define "title"}}{{.App.Name}} — apphive{{end}}
+{{define "nav-apps"}}active{{end}}
+
+{{define "content"}}
+{{$app := .App}}
+{{$mgr := .Manager}}
+{{$hs := .HealthStatus}}
+<div class="container page">
+  <div class="page-header">
+    <div class="d-flex align-center gap-3">
+      <a href="/" class="btn btn-ghost btn-sm">← Back</a>
+      <h1 class="page-title">{{$app.Name}}</h1>
+      <span class="badge {{statusClass $app.Status}}">{{$app.Status}}</span>
+      {{if $app.HealthEndpoint}}
+        {{if eq $hs "ok"}}<span class="health-dot health-ok" title="Health check passing"></span>{{end}}
+        {{if eq $hs "failing"}}<span class="health-dot health-bad" title="Health check failing"></span>{{end}}
+      {{end}}
+    </div>
+    <div class="action-group">
+      {{if eq $app.Status "running"}}
+      <form method="POST" action="/apps/{{$app.ID}}/stop">
+        <button class="btn btn-danger btn-sm">■ Stop</button>
+      </form>
+      {{if $app.RootfsPath}}
+      <form method="POST" action="/apps/{{$app.ID}}/restart">
+        <button class="btn btn-secondary btn-sm">↺ Restart</button>
+      </form>
+      {{end}}
+      {{else}}
+      {{if and $app.RootfsPath (ne $app.Status "pulling")}}
+      <form method="POST" action="/apps/{{$app.ID}}/start">
+        <button class="btn btn-success btn-sm">▶ Start</button>
+      </form>
+      {{end}}
+      {{if ne $app.Status "pulling"}}
+      <form method="POST" action="/apps/{{$app.ID}}/pull">
+        <button class="btn btn-ghost btn-sm">↓ Pull Image</button>
+      </form>
+      {{end}}
+      {{end}}
+      <a href="/apps/{{$app.ID}}/edit" class="btn btn-secondary btn-sm">Edit</a>
+    </div>
+  </div>
+
+  <div class="detail-grid">
+    <!-- Left: Info + Pull Progress + Logs -->
+    <div>
+      <!-- App info -->
+      <div class="card mb-3">
+        <div class="card-header"><span class="card-title">Info</span></div>
+        <div class="card-body">
+          <div class="info-row"><span class="info-label">Image</span><span class="info-value text-mono">{{$app.ImageRef}}</span></div>
+          {{if $app.Entrypoint}}<div class="info-row"><span class="info-label">Entrypoint</span><span class="info-value text-mono">{{range $app.Entrypoint}}{{.}} {{end}}</span></div>{{end}}
+          {{if $app.Command}}<div class="info-row"><span class="info-label">Command</span><span class="info-value text-mono">{{range $app.Command}}{{.}} {{end}}</span></div>{{end}}
+          {{if $app.WorkDir}}<div class="info-row"><span class="info-label">Work Dir</span><span class="info-value text-mono">{{$app.WorkDir}}</span></div>{{end}}
+          {{if $app.RootfsPath}}<div class="info-row"><span class="info-label">Rootfs</span><span class="info-value text-mono" style="font-size:11px;opacity:.7">{{$app.RootfsPath}}</span></div>{{end}}
+          {{if and $app.PruneAfterStart (not $app.RootfsPath)}}
+          <div class="info-row">
+            <span class="info-label">Rootfs</span>
+            <span class="info-value" style="color:var(--yellow)" title="Deleted after start to save disk. Re-pull before restarting.">🗑 pruned (re-pull to restart)</span>
+          </div>
+          {{end}}
+          {{if $app.ExposedPort}}
+          <div class="info-row">
+            <span class="info-label">Port</span>
+            <span class="info-value"><a href="http://localhost:{{$app.ExposedPort}}" target="_blank" class="port-link">localhost:{{$app.ExposedPort}}</a></span>
+          </div>
+          {{end}}
+          {{if $app.HealthEndpoint}}<div class="info-row"><span class="info-label">Health</span><span class="info-value text-mono">{{$app.HealthEndpoint}}</span></div>{{end}}
+          <div class="info-row"><span class="info-label">Auto-start</span><span class="info-value">{{if $app.AutoStart}}Yes{{else}}No{{end}}</span></div>
+          <div class="info-row"><span class="info-label">Prune after start</span><span class="info-value">{{if $app.PruneAfterStart}}Yes{{else}}No{{end}}</span></div>
+          <div class="info-row"><span class="info-label">Last Started</span><span class="info-value">{{formatTime $app.LastStarted}}</span></div>
+        </div>
+      </div>
+
+      {{if eq $app.Status "pulling"}}
+      <!-- Pull Progress (visible while image is being pulled) -->
+      <div class="card mb-3">
+        <div class="card-header">
+          <span class="card-title">Pull Progress</span>
+          <span class="text-muted" style="font-size:11px;animation:blink 1s step-end infinite">● live</span>
+        </div>
+        <div
+          class="log-viewer"
+          id="pull-log"
+          style="height:auto;min-height:80px;max-height:220px"
+          hx-ext="sse"
+          sse-connect="/apps/{{$app.ID}}/pull-progress"
+        ></div>
+      </div>
+      {{end}}
+
+      <!-- Live Logs -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Live Logs</span>
+          <span class="text-muted" style="font-size:11px">last 1000 lines</span>
+        </div>
+        <div class="log-toolbar">
+          <label>
+            <input type="checkbox" checked onchange="setAutoScroll(this.checked)"> Auto-scroll
+          </label>
+          <button class="btn btn-ghost btn-xs" onclick="clearLogView()">Clear view</button>
+        </div>
+        <!-- sse-swap + hx-swap intentionally omitted: the htmx:sseMessage listener below
+             renders lines as safe text nodes (prevents XSS from log output). -->
+        <div
+          class="log-viewer"
+          id="log-viewer"
+          hx-ext="sse"
+          sse-connect="/apps/{{$app.ID}}/logs"
+        ></div>
+      </div>
+    </div>
+
+    <!-- Right: Env Vars -->
+    <div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Environment Variables</span>
+          <span class="tag">{{len $app.EnvVars}}</span>
+        </div>
+        <div class="card-body">
+          {{if not $app.EnvVars}}
+          <p class="text-muted" style="font-size:13px">No env vars configured.</p>
+          {{else}}
+          <div>
+            {{range $app.EnvVars}}
+            <div class="env-view-row">
+              <span class="env-view-key">{{.Key}}</span>
+              <span class="env-view-value" data-actual="{{.Value}}" data-hidden="{{maskValue .Value}}" data-showing="0">{{maskValue .Value}}</span>
+              <div class="env-actions">
+                <button class="icon-btn" title="Reveal" onclick="toggleEnvReveal(this)">👁</button>
+                <button class="icon-btn" title="Copy" onclick="copyEnvValue(this)">📋</button>
+              </div>
+            </div>
+            {{end}}
+          </div>
+          {{end}}
+          <div class="mt-3">
+            <a href="/apps/{{$app.ID}}/edit" class="btn btn-ghost btn-sm w-100">Edit env vars</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Route SSE messages to the correct element by checking e.target.
+document.addEventListener('htmx:sseMessage', function(e) {
+  const lv = document.getElementById('log-viewer');
+  if (lv && e.target === lv) {
+    const line = document.createElement('span');
+    line.className = 'log-line';
+    line.textContent = e.detail.data; // textContent is XSS-safe
+    lv.appendChild(line);
+    window.scrollLog();
+    return;
+  }
+
+  const pl = document.getElementById('pull-log');
+  if (pl && e.target === pl) {
+    const line = document.createElement('span');
+    line.className = 'log-line';
+    line.textContent = e.detail.data;
+    pl.appendChild(line);
+    pl.scrollTop = pl.scrollHeight;
+  }
+});
+
+// When the pull-progress SSE closes (pull done/error), reload to update status.
+document.addEventListener('htmx:sseClose', function(e) {
+  const pl = document.getElementById('pull-log');
+  if (pl && e.target === pl) {
+    setTimeout(() => location.reload(), 800);
+  }
+});
+</script>
+{{end}}

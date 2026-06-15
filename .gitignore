@@ -1,0 +1,18 @@
+# Compiled binaries
+apphive
+apphive.exe
+
+# Database and runtime data
+*.db
+data/
+
+# Go test caches
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

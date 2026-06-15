@@ -1,0 +1,110 @@
+{{template "layout" .}}
+
+{{define "title"}}Apps — apphive{{end}}
+{{define "nav-apps"}}active{{end}}
+
+{{define "content"}}
+<div class="container page">
+  <div class="page-header">
+    <h1 class="page-title">Apps</h1>
+    <div class="d-flex gap-2 align-center" style="flex-wrap:wrap">
+      <div class="search-wrap">
+        <span class="search-icon">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </span>
+        <input
+          type="search"
+          class="search-input"
+          placeholder="Search apps…"
+          oninput="filterApps(this.value)"
+          aria-label="Search apps"
+        >
+      </div>
+      <form method="POST" action="/apps/pull-all" style="display:inline">
+        <button type="submit" class="btn btn-ghost btn-sm" title="Pull all stopped/errored apps">
+          ↓ Pull All
+        </button>
+      </form>
+      <a href="/apps/new" class="btn btn-primary btn-sm">+ New App</a>
+    </div>
+  </div>
+
+  {{if not .Apps}}
+  <div class="card">
+    <div class="empty-state">
+      <div class="empty-state-icon">📦</div>
+      <div class="empty-state-title">No apps yet</div>
+      <div class="empty-state-desc">Add your first app to get started.</div>
+      <a href="/apps/new" class="btn btn-primary">+ New App</a>
+    </div>
+  </div>
+  {{else}}
+  <div class="card">
+    <table class="app-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Image</th>
+          <th>Status</th>
+          <th>Port</th>
+          <th>Last Started</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Apps}}
+        <tr class="app-row" data-name="{{.Name}}" data-image="{{.ImageRef}}">
+          <td>
+            <a href="/apps/{{.ID}}" class="app-name">{{.Name}}</a>
+            {{if .AutoStart}}<span class="tag" title="Auto-starts on dashboard boot">auto</span>{{end}}
+            {{if and .PruneAfterStart (not .RootfsPath) (not (eq .Status "running"))}}<span class="tag" style="color:var(--yellow);border-color:var(--yellow)" title="Rootfs deleted — re-pull before starting">needs pull</span>{{end}}
+          </td>
+          <td><span class="app-image" title="{{.ImageRef}}">{{.ImageRef}}</span></td>
+          <td>
+            <span class="badge {{statusClass .Status}}">{{.Status}}</span>
+          </td>
+          <td>
+            {{if .ExposedPort}}
+            <a href="http://localhost:{{.ExposedPort}}" target="_blank" class="port-link" title="Open app">:{{.ExposedPort}}</a>
+            {{else}}<span class="text-muted">—</span>{{end}}
+          </td>
+          <td class="text-muted" style="font-size:12px">{{formatTime .LastStarted}}</td>
+          <td>
+            <div class="action-group">
+              {{if eq .Status "running"}}
+              <form method="POST" action="/apps/{{.ID}}/stop">
+                <button class="btn btn-danger btn-xs" title="Stop">■ Stop</button>
+              </form>
+              <form method="POST" action="/apps/{{.ID}}/restart">
+                <button class="btn btn-secondary btn-xs" title="Restart">↺</button>
+              </form>
+              {{else}}
+              {{if and .RootfsPath (ne .Status "pulling")}}
+              <form method="POST" action="/apps/{{.ID}}/start">
+                <button class="btn btn-success btn-xs" title="Start">▶ Start</button>
+              </form>
+              {{end}}
+              <form method="POST" action="/apps/{{.ID}}/pull">
+                <button class="btn btn-ghost btn-xs" title="Pull image">↓ Pull</button>
+              </form>
+              {{end}}
+              <a href="/apps/{{.ID}}" class="btn btn-ghost btn-xs">Logs</a>
+              <a href="/apps/{{.ID}}/edit" class="btn btn-ghost btn-xs">Edit</a>
+              <button
+                class="btn btn-ghost btn-xs"
+                style="color:var(--red)"
+                onclick="if(confirm('Delete {{.Name}}?')) htmx.ajax('DELETE','/apps/{{.ID}}',{target:'body'})"
+                title="Delete"
+              >✕</button>
+            </div>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{end}}

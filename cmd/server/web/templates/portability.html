@@ -1,0 +1,96 @@
+{{template "layout" .}}
+
+{{define "title"}}Portability — apphive{{end}}
+{{define "nav-portability"}}active{{end}}
+
+{{define "content"}}
+<div class="container page">
+  <div class="page-header">
+    <h1 class="page-title">Portability</h1>
+  </div>
+
+  <div style="max-width: 640px">
+
+    <!-- Export -->
+    <div class="card portability-section">
+      <div class="card-header"><span class="card-title">Export</span></div>
+      <div class="card-body">
+        <p style="font-size:13px; color:var(--muted); margin-bottom:14px">
+          Downloads a JSON file containing all app configs and environment variables.
+          Store it in a private location — it contains env var values in plaintext.
+        </p>
+        <a href="/portability/export" class="btn btn-primary">↓ Download Export File</a>
+      </div>
+    </div>
+
+    <!-- Import -->
+    <div class="card portability-section">
+      <div class="card-header"><span class="card-title">Import</span></div>
+      <div class="card-body">
+        <p style="font-size:13px; color:var(--muted); margin-bottom:14px">
+          Upload a previously exported JSON file to restore app configs.
+          Apps with existing IDs are skipped. Restored apps start in <strong>stopped</strong> state.
+        </p>
+
+        {{if .ImportError}}
+        <div class="form-error-item mb-3">{{.ImportError}}</div>
+        {{end}}
+
+        {{if .ImportResult}}
+        <div style="background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.3); border-radius:var(--radius); padding:12px 16px; margin-bottom:16px; font-size:13px;">
+          ✅ Import complete: <strong>{{.ImportResult.Restored}}</strong> restored,
+          <strong>{{.ImportResult.Skipped}}</strong> skipped.
+          {{if .ImportResult.Errors}}
+          <br><span style="color:var(--red)">Errors: {{range .ImportResult.Errors}}{{.}}; {{end}}</span>
+          {{end}}
+        </div>
+        <form method="POST" action="/apps/pull-all" style="margin-bottom:12px">
+          <button type="submit" class="btn btn-primary">↓ Pull All Restored Apps</button>
+        </form>
+        {{end}}
+
+        <form method="POST" action="/portability/import" enctype="multipart/form-data">
+          <div class="form-group">
+            <label class="form-label" for="import_file">Export file (.json)</label>
+            <input id="import_file" type="file" name="import_file" class="form-control" accept=".json" required>
+          </div>
+          <button type="submit" class="btn btn-secondary">Upload & Import</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Sequential Deploy -->
+    <div class="card portability-section">
+      <div class="card-header"><span class="card-title">Import &amp; Sequential Deploy</span></div>
+      <div class="card-body">
+        <p style="font-size:13px; color:var(--muted); margin-bottom:14px">
+          Designed for <strong>ephemeral storage</strong> (e.g. free-tier PaaS with limited disk).
+          Imports configs, then for each app in order: pulls the image → starts the app → <em>immediately prunes</em>
+          the rootfs from disk before moving to the next app. This prevents OOM crashes caused by
+          holding multiple image filesystems on disk at once.
+        </p>
+
+        <form method="POST" action="/portability/sequential-deploy" enctype="multipart/form-data">
+          <div class="form-group">
+            <label class="form-label" for="seq_import_file">Export file (.json)</label>
+            <input id="seq_import_file" type="file" name="import_file" class="form-control" accept=".json" required>
+          </div>
+          <button type="submit" class="btn btn-primary">▶ Import &amp; Deploy All</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Notes -->
+    <div class="card">
+      <div class="card-body">
+        <p style="font-size:13px; color:var(--muted);">
+          <strong style="color:var(--text)">About rootfs:</strong> Container image filesystems are <em>not</em> included in the export (too large).
+          After importing on a fresh container, use <strong>Sequential Deploy</strong> above (ephemeral storage)
+          or <strong>Pull All</strong> (persistent storage) to re-download images.
+        </p>
+      </div>
+    </div>
+
+  </div>
+</div>
+{{end}}

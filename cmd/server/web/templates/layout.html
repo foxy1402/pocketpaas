@@ -1,0 +1,155 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{block "title" .}}apphive{{end}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/htmx-sse.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+    </svg>
+    apphive
+  </a>
+  <div class="nav-links">
+    <a href="/" class="nav-link {{block "nav-apps" .}}{{end}}">Apps</a>
+    <a href="/portability" class="nav-link {{block "nav-portability" .}}{{end}}">Portability</a>
+  </div>
+  <div class="nav-end d-flex align-center gap-3">
+    <div id="sys-stats" class="sys-stats">
+      <span id="stat-cpu" title="Host CPU usage">CPU —</span>
+      <span class="sys-stats-sep">|</span>
+      <span id="stat-ram" title="Host RAM usage">RAM —</span>
+    </div>
+    <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
+  </div>
+</nav>
+
+<main>
+  {{block "content" .}}{{end}}
+</main>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+// Toast system
+function showToast(msg, type) {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast toast-' + (type || 'info');
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => {
+    t.style.animation = 'toast-out .2s ease forwards';
+    setTimeout(() => t.remove(), 200);
+  }, 3500);
+}
+
+// Show toast on HTMX success/error
+document.addEventListener('htmx:afterRequest', function(e) {
+  if (e.detail.failed && e.detail.xhr) {
+    const msg = e.detail.xhr.responseText || 'Request failed';
+    showToast(msg.slice(0, 100), 'error');
+  }
+});
+
+// Env var reveal/copy
+function toggleEnvReveal(btn) {
+  const row = btn.closest('.env-view-row');
+  const val = row.querySelector('.env-view-value');
+  const hidden = val.dataset.hidden;
+  const actual = val.dataset.actual;
+  if (val.dataset.showing === '1') {
+    val.textContent = hidden;
+    val.dataset.showing = '0';
+    btn.title = 'Reveal';
+    btn.innerHTML = '&#x1F441;';
+  } else {
+    val.textContent = actual;
+    val.dataset.showing = '1';
+    btn.title = 'Hide';
+    btn.innerHTML = '&#x1F648;';
+  }
+}
+
+function copyEnvValue(btn) {
+  const row = btn.closest('.env-view-row');
+  const val = row.querySelector('.env-view-value').dataset.actual;
+  navigator.clipboard.writeText(val).then(() => showToast('Copied to clipboard', 'success'));
+}
+
+// Client-side app search
+function filterApps(q) {
+  const rows = document.querySelectorAll('.app-row');
+  q = q.toLowerCase();
+  rows.forEach(r => {
+    const name = (r.dataset.name || '').toLowerCase();
+    const img  = (r.dataset.image || '').toLowerCase();
+    r.style.display = (!q || name.includes(q) || img.includes(q)) ? '' : 'none';
+  });
+}
+
+// Log viewer auto-scroll
+(function() {
+  let autoScroll = true;
+  window.setAutoScroll = function(v) { autoScroll = v; };
+  window.scrollLog = function() {
+    if (!autoScroll) return;
+    const lv = document.querySelector('.log-viewer');
+    if (lv) lv.scrollTop = lv.scrollHeight;
+  };
+})();
+
+// Clear log view (browser-side only, doesn't affect the ring buffer)
+function clearLogView() {
+  const lv = document.querySelector('.log-viewer');
+  if (lv) lv.innerHTML = '';
+}
+
+// System stats bar — fetched every 5 s
+(function() {
+  function refreshStats() {
+    fetch('/api/stats').then(function(r) { return r.json(); }).then(function(d) {
+      var cpuEl = document.getElementById('stat-cpu');
+      var ramEl = document.getElementById('stat-ram');
+      if (cpuEl) {
+        var pct = d.cpu_pct.toFixed(0);
+        cpuEl.textContent = 'CPU ' + pct + '%';
+        cpuEl.style.color = d.cpu_pct > 80 ? 'var(--red)' : d.cpu_pct > 50 ? 'var(--yellow)' : '';
+      }
+      if (ramEl && d.ram_total_mb > 0) {
+        ramEl.textContent = 'RAM ' + d.ram_used_mb + '/' + d.ram_total_mb + 'MB';
+        var pct = d.ram_used_mb / d.ram_total_mb;
+        ramEl.style.color = pct > 0.85 ? 'var(--red)' : pct > 0.65 ? 'var(--yellow)' : '';
+      }
+    }).catch(function() {});
+  }
+  refreshStats();
+  setInterval(refreshStats, 5000);
+})();
+
+// Add env row (form)
+function addEnvRow() {
+  const list = document.getElementById('env-list');
+  const row = document.createElement('div');
+  row.className = 'env-row';
+  row.innerHTML = `
+    <input type="text" name="env_key" class="form-control env-key" placeholder="KEY">
+    <input type="text" name="env_value" class="form-control env-value" placeholder="value">
+    <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.env-row').remove()">✕</button>
+  `;
+  list.appendChild(row);
+  row.querySelector('input').focus();
+}
+</script>
+</body>
+</html>
+{{end}}

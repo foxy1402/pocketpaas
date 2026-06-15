@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — apphive</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-logo">
+      <span class="login-logo-icon">🖥️</span>
+      <span class="login-logo-name">apphive</span>
+      <p class="text-muted mt-2" style="font-size:12px">Personal app runtime dashboard</p>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        {{if .Error}}
+        <div class="form-error-item mb-3">{{.Error}}</div>
+        {{end}}
+        <form method="POST" action="/login" autocomplete="on">
+          <div class="form-group">
+            <label class="form-label" for="password">Password</label>
+            <input
+              id="password"
+              type="password"
+              name="password"
+              class="form-control"
+              placeholder="Enter dashboard password"
+              autofocus
+              autocomplete="current-password"
+            >
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Sign in</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

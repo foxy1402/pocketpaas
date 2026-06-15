@@ -1,0 +1,23 @@
+# Compiled local binaries (never needed in the Docker build context)
+apphive
+apphive.exe
+
+# Runtime data
+*.db
+data/
+
+# Version control
+.git/
+.gitignore
+
+# CI / GitHub metadata
+.github/
+
+# Docs
+*.md
+
+# Editor artifacts
+.idea/
+.vscode/
+*.swp
+.DS_Store
