@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"apphive/internal/portability"
@@ -247,15 +247,30 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		<-pullRelayed
 
 		// Apply image config defaults only when the user has no overrides.
-		ep, cmd, workDir, cfgErr := registry.ImageConfig(img)
+		ep, cmd, workDir, port, cfgErr := registry.ImageConfig(img)
 		if cfgErr != nil {
 			log.Printf("warn: image config for %s: %v", app.ID, cfgErr)
 		} else {
-			if len(app.Entrypoint) == 0 && len(ep) > 0 {
+			var detected []string
+			if len(app.Entrypoint) == 0 && len(app.Command) == 0 && (len(ep) > 0 || len(cmd) > 0) {
 				_ = srv.store.UpdateEntrypointCmd(app.ID, ep, cmd)
+				if len(ep) > 0 {
+					detected = append(detected, fmt.Sprintf("entrypoint=%v", ep))
+				}
+				if len(cmd) > 0 {
+					detected = append(detected, fmt.Sprintf("cmd=%v", cmd))
+				}
 			}
 			if app.WorkDir == "" && workDir != "" {
 				_ = srv.store.UpdateWorkDir(app.ID, workDir)
+				detected = append(detected, fmt.Sprintf("workdir=%s", workDir))
+			}
+			if app.ExposedPort == 0 && port > 0 {
+				_ = srv.store.UpdateExposedPort(app.ID, port)
+				detected = append(detected, fmt.Sprintf("port=%d", port))
+			}
+			if len(detected) > 0 {
+				dlog.Write("│  Auto-configured: " + strings.Join(detected, ", "))
 			}
 		}
 		_ = srv.store.UpdateRootfsPath(app.ID, destDir)
@@ -277,7 +292,7 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 
 		// ── Prune ── (always prune to free ephemeral storage for next app)
 		dlog.Write("│  Pruning rootfs…")
-		if err := os.RemoveAll(destDir); err != nil {
+		if err := runtime.PruneRootfsKeepDNS(destDir); err != nil {
 			dlog.Write("│  ✗ Prune error: " + err.Error())
 		} else {
 			_ = srv.store.UpdateRootfsPath(app.ID, "")

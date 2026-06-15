@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !linux && !windows
 
 package runtime
 
@@ -7,11 +7,14 @@ import (
 	"syscall"
 )
 
-func setSysProcAttr(cmd *exec.Cmd) {
+// chrootEnabled is false on non-Linux platforms; startProcess uses host-path
+// prefixing instead.
+const chrootEnabled = false
+
+func setSysProcAttr(cmd *exec.Cmd, _ string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killProcessGroup sends SIGTERM to the entire process group.
 func killProcessGroup(pid int) {
 	if pid > 0 {
 		syscall.Kill(-pid, syscall.SIGTERM)

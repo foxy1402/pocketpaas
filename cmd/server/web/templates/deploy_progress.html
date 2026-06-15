@@ -23,13 +23,10 @@
           <input type="checkbox" checked onchange="setAutoScroll(this.checked)"> Auto-scroll
         </label>
       </div>
-      <!-- SSE connects here; htmx:sseMessage JS listener renders lines -->
       <div
         class="log-viewer"
         id="deploy-log"
         style="min-height:300px;max-height:70vh"
-        hx-ext="sse"
-        sse-connect="/portability/deploy-stream"
       ></div>
     </div>
 
@@ -47,27 +44,33 @@
 </div>
 
 <script>
-// Append deploy log lines via SSE (uses textContent for XSS safety).
-document.addEventListener('htmx:sseMessage', function(e) {
+(function() {
   const dl = document.getElementById('deploy-log');
-  if (!dl || e.target !== dl) return;
-  const line = document.createElement('span');
-  line.className = 'log-line';
-  line.textContent = e.detail.data;
-  dl.appendChild(line);
-  window.scrollLog();
-});
+  if (!dl) return;
+  const src = new EventSource('/portability/deploy-stream');
 
-// On SSE close (event: done), show the done banner.
-document.addEventListener('htmx:sseClose', function(e) {
-  const dl = document.getElementById('deploy-log');
-  if (!dl || e.target !== dl) return;
-  const badge = document.getElementById('deploy-status-badge');
-  const dot = document.getElementById('live-dot');
-  const banner = document.getElementById('deploy-done-banner');
-  if (badge) { badge.textContent = 'done'; badge.className = 'badge badge-stopped'; }
-  if (dot) dot.style.display = 'none';
-  if (banner) banner.style.display = '';
-});
+  src.onmessage = function(e) {
+    const line = document.createElement('span');
+    line.className = 'log-line';
+    line.textContent = e.data;
+    dl.appendChild(line);
+    window.scrollLog();
+  };
+
+  function markDone() {
+    src.close();
+    const badge = document.getElementById('deploy-status-badge');
+    const dot   = document.getElementById('live-dot');
+    const banner = document.getElementById('deploy-done-banner');
+    if (badge)  { badge.textContent = 'done'; badge.className = 'badge badge-stopped'; }
+    if (dot)    dot.style.display = 'none';
+    if (banner) banner.style.display = '';
+  }
+
+  src.addEventListener('done', markDone);
+  src.onerror = function() {
+    if (src.readyState === EventSource.CLOSED) markDone();
+  };
+})();
 </script>
 {{end}}

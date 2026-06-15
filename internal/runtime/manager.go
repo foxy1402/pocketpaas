@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -175,11 +174,11 @@ func (m *Manager) Start(appID string) error {
 				// Crashed immediately — keep rootfs for debugging.
 				return
 			}
-			if err := os.RemoveAll(rootfs); err != nil {
+			if err := PruneRootfsKeepDNS(rootfs); err != nil {
 				log.Printf("prune rootfs %s: %v", appID, err)
 				return
 			}
-			log.Printf("pruned rootfs for app %s (%s)", appID, rootfs)
+			log.Printf("pruned rootfs for app %s (%s, kept /etc for DNS)", appID, rootfs)
 			_ = m.store.UpdateRootfsPath(appID, "")
 		}()
 	}

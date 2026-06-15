@@ -117,6 +117,12 @@ func (s *AppStore) UpdateWorkDir(id, workDir string) error {
 	return err
 }
 
+func (s *AppStore) UpdateExposedPort(id string, port int) error {
+	_, err := s.db.Exec(`UPDATE apps SET exposed_port=?, updated_at=? WHERE id=?`,
+		port, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
 func (s *AppStore) UpdateEntrypointCmd(id string, entrypoint, command []string) error {
 	ep, err := json.Marshal(entrypoint)
 	if err != nil {

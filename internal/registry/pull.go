@@ -3,6 +3,8 @@ package registry
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -58,14 +60,40 @@ func Pull(ctx context.Context, imageRef string, creds *Credentials, progress cha
 	return img, nil
 }
 
-// ImageConfig extracts the default entrypoint, cmd, and working directory
-// from the image config.
-func ImageConfig(img v1.Image) (entrypoint []string, cmd []string, workDir string, err error) {
+// ImageConfig extracts the default entrypoint, cmd, working directory, and first
+// exposed TCP port from the image config. port is 0 when none is declared.
+func ImageConfig(img v1.Image) (entrypoint []string, cmd []string, workDir string, port int, err error) {
 	cfg, err := img.ConfigFile()
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("read image config: %w", err)
+		return nil, nil, "", 0, fmt.Errorf("read image config: %w", err)
 	}
-	return cfg.Config.Entrypoint, cfg.Config.Cmd, cfg.Config.WorkingDir, nil
+	return cfg.Config.Entrypoint, cfg.Config.Cmd, cfg.Config.WorkingDir, pickPort(cfg.Config.ExposedPorts), nil
+}
+
+// pickPort selects the most likely web-service port from the image's ExposedPorts
+// map (keys are "port/proto", e.g. "8080/tcp"). Returns 0 when none is declared.
+func pickPort(ports map[string]struct{}) int {
+	preferred := []int{8080, 3000, 80, 5000, 4000, 8000, 8888, 9000}
+	seen := make(map[int]bool, len(ports))
+	for k := range ports {
+		p, _, _ := strings.Cut(k, "/")
+		if n, err := strconv.Atoi(p); err == nil {
+			seen[n] = true
+		}
+	}
+	for _, p := range preferred {
+		if seen[p] {
+			return p
+		}
+	}
+	// fallback: first numeric port found
+	for k := range ports {
+		p, _, _ := strings.Cut(k, "/")
+		if n, err := strconv.Atoi(p); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // sendProgress sends msg to ch without blocking.

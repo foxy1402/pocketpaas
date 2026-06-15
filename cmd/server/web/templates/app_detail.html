@@ -86,8 +86,6 @@
           class="log-viewer"
           id="pull-log"
           style="height:auto;min-height:80px;max-height:220px"
-          hx-ext="sse"
-          sse-connect="/apps/{{$app.ID}}/pull-progress"
         ></div>
       </div>
       {{end}}
@@ -104,13 +102,9 @@
           </label>
           <button class="btn btn-ghost btn-xs" onclick="clearLogView()">Clear view</button>
         </div>
-        <!-- sse-swap + hx-swap intentionally omitted: the htmx:sseMessage listener below
-             renders lines as safe text nodes (prevents XSS from log output). -->
         <div
           class="log-viewer"
           id="log-viewer"
-          hx-ext="sse"
-          sse-connect="/apps/{{$app.ID}}/logs"
         ></div>
       </div>
     </div>
@@ -149,34 +143,42 @@
 </div>
 
 <script>
-// Route SSE messages to the correct element by checking e.target.
-document.addEventListener('htmx:sseMessage', function(e) {
+// Raw EventSource for Live Logs — textContent is XSS-safe.
+(function() {
   const lv = document.getElementById('log-viewer');
-  if (lv && e.target === lv) {
+  if (!lv) return;
+  const src = new EventSource('/apps/{{$app.ID}}/logs');
+  src.onmessage = function(e) {
     const line = document.createElement('span');
     line.className = 'log-line';
-    line.textContent = e.detail.data; // textContent is XSS-safe
+    line.textContent = e.data;
     lv.appendChild(line);
     window.scrollLog();
-    return;
-  }
+  };
+  window.addEventListener('beforeunload', function() { src.close(); });
+})();
 
+// Raw EventSource for Pull Progress — only present when status is "pulling".
+(function() {
   const pl = document.getElementById('pull-log');
-  if (pl && e.target === pl) {
+  if (!pl) return;
+  const src = new EventSource('/apps/{{$app.ID}}/pull-progress');
+  src.onmessage = function(e) {
     const line = document.createElement('span');
     line.className = 'log-line';
-    line.textContent = e.detail.data;
+    line.textContent = e.data;
     pl.appendChild(line);
     pl.scrollTop = pl.scrollHeight;
-  }
-});
-
-// When the pull-progress SSE closes (pull done/error), reload to update status.
-document.addEventListener('htmx:sseClose', function(e) {
-  const pl = document.getElementById('pull-log');
-  if (pl && e.target === pl) {
+  };
+  src.addEventListener('done', function() {
+    src.close();
     setTimeout(() => location.reload(), 800);
-  }
-});
+  });
+  src.onerror = function() {
+    if (src.readyState === EventSource.CLOSED) {
+      setTimeout(() => location.reload(), 1500);
+    }
+  };
+})();
 </script>
 {{end}}

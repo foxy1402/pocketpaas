@@ -155,7 +155,7 @@ const pullTimeout = 30 * time.Minute
 
 // runPull executes a full pull+extract cycle for one app, sending progress to ch.
 // It is shared between single-app and pull-all flows.
-func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existingCMD []string, existingWorkDir string, ch chan<- string) {
+func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existingCMD []string, existingWorkDir string, existingPort int, ch chan<- string) {
 	var creds *registry.Credentials
 	if srv.regCreds != nil && srv.regCreds.Username != "" {
 		creds = srv.regCreds
@@ -177,16 +177,31 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 		return
 	}
 
-	// Store image-provided defaults only when the user has no override.
-	ep, cmd, workDir, err := registry.ImageConfig(img)
-	if err != nil {
-		log.Printf("warn: could not read image config for %s: %v", appID, err)
+	// Apply image config defaults only when the user has no manual override.
+	ep, cmd, workDir, port, cfgErr := registry.ImageConfig(img)
+	if cfgErr != nil {
+		log.Printf("warn: could not read image config for %s: %v", appID, cfgErr)
 	} else {
-		if len(existingEP) == 0 && len(ep) > 0 {
+		var detected []string
+		if len(existingEP) == 0 && len(existingCMD) == 0 && (len(ep) > 0 || len(cmd) > 0) {
 			_ = srv.store.UpdateEntrypointCmd(appID, ep, cmd)
+			if len(ep) > 0 {
+				detected = append(detected, fmt.Sprintf("entrypoint=%v", ep))
+			}
+			if len(cmd) > 0 {
+				detected = append(detected, fmt.Sprintf("cmd=%v", cmd))
+			}
 		}
 		if existingWorkDir == "" && workDir != "" {
 			_ = srv.store.UpdateWorkDir(appID, workDir)
+			detected = append(detected, fmt.Sprintf("workdir=%s", workDir))
+		}
+		if existingPort == 0 && port > 0 {
+			_ = srv.store.UpdateExposedPort(appID, port)
+			detected = append(detected, fmt.Sprintf("port=%d", port))
+		}
+		if len(detected) > 0 {
+			ch <- "Auto-configured from image: " + strings.Join(detected, ", ")
 		}
 	}
 
@@ -215,7 +230,7 @@ func (srv *Server) postPullApp(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ch := srv.manager.OpenPullChannel(app.ID)
 		defer srv.manager.ClosePullChannel(app.ID)
-		srv.runPull(app.ID, app.ImageRef, destDir, app.Entrypoint, app.Command, app.WorkDir, ch)
+		srv.runPull(app.ID, app.ImageRef, destDir, app.Entrypoint, app.Command, app.WorkDir, app.ExposedPort, ch)
 	}()
 
 	http.Redirect(w, r, fmt.Sprintf("/apps/%s", app.ID), http.StatusSeeOther)
@@ -302,7 +317,7 @@ func (srv *Server) postPullAll(w http.ResponseWriter, r *http.Request) {
 		go func(a *store.App, dest string) {
 			ch := srv.manager.OpenPullChannel(a.ID)
 			defer srv.manager.ClosePullChannel(a.ID)
-			srv.runPull(a.ID, a.ImageRef, dest, a.Entrypoint, a.Command, a.WorkDir, ch)
+			srv.runPull(a.ID, a.ImageRef, dest, a.Entrypoint, a.Command, a.WorkDir, a.ExposedPort, ch)
 		}(app, destDir)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)

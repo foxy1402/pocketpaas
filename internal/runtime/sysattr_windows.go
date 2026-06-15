@@ -4,6 +4,7 @@ package runtime
 
 import "os/exec"
 
-func setSysProcAttr(cmd *exec.Cmd) {}
+const chrootEnabled = false
 
-func killProcessGroup(pid int) {}
+func setSysProcAttr(_ *exec.Cmd, _ string) {}
+func killProcessGroup(_ int)               {}
