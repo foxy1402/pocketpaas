@@ -1,6 +1,6 @@
 # Compiled binaries
-apphive
-apphive.exe
+pocketpaas
+pocketpaas.exe
 
 # Database and runtime data
 *.db

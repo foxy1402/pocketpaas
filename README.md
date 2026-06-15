@@ -1,4 +1,4 @@
-# apphive
+# pocketpaas
 
 A lightweight personal app runtime dashboard. Pull OCI images, run them as
 isolated subprocesses, and manage them from a clean dark web UI — no Docker
@@ -9,13 +9,11 @@ daemon required.
 ## Quick Start (Docker)
 
 ```bash
-docker build -t apphive .
-
 docker run -d \
   -p 8080:8080 \
   -e DASHBOARD_PASSWORD=changeme \
-  --name apphive \
-  apphive
+  --name pocketpaas \
+  ghcr.io/foxy1402/pocketpaas:latest
 ```
 
 Open `http://localhost:8080` and log in.
@@ -31,9 +29,9 @@ survives container restarts:
 docker run -d \
   -p 8080:8080 \
   -e DASHBOARD_PASSWORD=changeme \
-  -v apphive-data:/data \
-  --name apphive \
-  apphive
+  -v pocketpaas-data:/data \
+  --name pocketpaas \
+  ghcr.io/foxy1402/pocketpaas:latest
 ```
 
 ---
@@ -56,7 +54,8 @@ docker run -d \
 **Ephemeral (no volume):**
 The database is wiped on every container restart. Use the **Portability** page
 to export your app configs before stopping the container, and import them after
-restarting. Then use **Pull All** to re-download the image filesystems.
+restarting. Then use **Sequential Deploy** to re-pull and start apps one by one
+without exhausting ephemeral storage.
 
 **Persistent (with volume):**
 The database and rootfs directories survive restarts. Apps with
@@ -74,6 +73,9 @@ The database and rootfs directories survive restarts. Apps with
 - **Live log streaming** — last 1000 lines buffered; streamed live via SSE
 - **Health checks** — optional HTTP ping every 15 s; shown as a status dot
 - **Export / Import** — plain JSON backup of all app configs and env vars
+- **Sequential Deploy** — import and deploy apps one by one (pull → start →
+  prune rootfs → next), preventing OOM on ephemeral storage
+- **System stats** — live CPU % and RAM usage displayed in the nav bar
 - **Auto-start** — apps can be configured to start automatically on dashboard
   boot (useful with persistent storage)
 - **Exposed port links** — click-through links to apps running on localhost
@@ -94,6 +96,7 @@ internal/
   runtime/           Subprocess manager + log buffer
   store/             SQLite persistence
   portability/       Export / Import
+  sysinfo/           CPU & RAM stats (Linux /proc)
 ```
 
 ---
@@ -101,11 +104,11 @@ internal/
 ## Building Locally
 
 ```bash
-go build -o apphive ./cmd/server
-DASHBOARD_PASSWORD=secret ./apphive
+go build -o pocketpaas ./cmd/server
+DASHBOARD_PASSWORD=secret ./pocketpaas
 ```
 
-Requires Go 1.22+. No other dependencies needed at runtime.
+Requires Go 1.25+. No other dependencies needed at runtime.
 
 ---
 
