@@ -3,21 +3,34 @@
 package runtime
 
 import (
+	"log"
 	"os/exec"
 	"syscall"
 )
 
-// chrootEnabled tells startProcess that SysProcAttr.Chroot is available so it
-// can use proper chroot semantics instead of host-path prefixing.
-const chrootEnabled = true
+// chrootEnabled is set at startup by probing whether CAP_SYS_CHROOT is
+// available. It is true when pocketpaas is running as the container's main
+// process (e.g. via the ghcr Docker image), and false when running inside a
+// restricted PaaS-assigned container reached only by SSH.
+var chrootEnabled bool
 
-// setSysProcAttr sets process-group isolation (so all children die on stop) and
-// optionally chroots the child into rootfsPath before exec.
-// An empty rootfsPath means no chroot.
+func init() {
+	// chroot("/") is a no-op if it succeeds (root stays the same) but
+	// requires CAP_SYS_CHROOT. EPERM means the capability is absent.
+	if err := syscall.Chroot("/"); err == nil {
+		chrootEnabled = true
+	} else {
+		log.Printf("runtime: chroot(2) unavailable (%v) — apps will run in rootfs-prefix mode (no filesystem isolation)", err)
+		log.Printf("runtime: this is normal inside SSH-only PaaS containers; apps still work via LD_LIBRARY_PATH resolution")
+	}
+}
+
+// setSysProcAttr sets process-group isolation (so all children die on stop)
+// and, when rootfsPath is non-empty, chroots the child into that directory.
 func setSysProcAttr(cmd *exec.Cmd, rootfsPath string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
-		Chroot:  rootfsPath,
+		Chroot:  rootfsPath, // empty string = no chroot
 	}
 }
 

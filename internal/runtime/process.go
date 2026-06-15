@@ -3,6 +3,7 @@ package runtime
 import (
 	"bufio"
 	"context"
+	"debug/elf"
 	"fmt"
 	"io"
 	"os"
@@ -38,7 +39,7 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	var cmd *exec.Cmd
 
 	if useChroot {
-		// ── Chroot path (Linux) ──────────────────────────────────────────────
+		// ── Chroot path (Linux with CAP_SYS_CHROOT) ──────────────────────────
 		// Resolve the binary within the extracted rootfs.
 		// We build exec.Cmd directly (bypassing exec.Command) so that
 		// LookPath is not called on the HOST; the kernel resolves the path
@@ -56,9 +57,12 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		// Copy DNS files so the app can reach the network inside the chroot.
 		ensureChrootDNS(app.RootfsPath)
 	} else {
-		// ── Non-chroot path (Windows / macOS dev builds) ─────────────────────
-		// Prefix absolute argv paths with the rootfs directory so the host can
-		// locate the binary (e.g. /usr/bin/python → /data/.../rootfs/usr/bin/python).
+		// ── Non-chroot / rootfs-prefix path ──────────────────────────────────
+		// Used on non-Linux platforms (dev builds) and on Linux containers
+		// that lack CAP_SYS_CHROOT (SSH-only PaaS containers).
+		//
+		// Step 1: prefix every absolute argv token with the rootfs path so
+		// the kernel can find and exec the binary on the host filesystem.
 		argv := make([]string, len(rawArgv))
 		for i, a := range rawArgv {
 			if app.RootfsPath != "" && filepath.IsAbs(a) {
@@ -78,10 +82,50 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		} else if app.WorkDir != "" {
 			cmd.Dir = app.WorkDir
 		}
+
+		// Step 2: use the image's own dynamic linker so the binary runs
+		// correctly regardless of the host's libc flavour.
+		//
+		// Every dynamically-linked ELF binary has a PT_INTERP segment that
+		// names its required dynamic linker (e.g. /lib/ld-musl-x86_64.so.1
+		// for Alpine, or /lib/x86_64-linux-gnu/ld-linux-x86_64.so.2 for
+		// Debian). If we exec the binary directly on a host with a different
+		// libc, the kernel will fail to find that interpreter.
+		//
+		// Solution: read PT_INTERP from the binary, locate that linker inside
+		// the rootfs, and invoke it as:
+		//   <rootfs-linker> --library-path <rootfs-lib-dirs> <binary> [args…]
+		//
+		// This works for any image+host combination — Alpine on Debian,
+		// Debian on Alpine, etc. — with zero capabilities required.
+		// Static binaries (Go, Rust/musl) have no PT_INTERP; they fall
+		// through and exec correctly as-is.
+		if app.RootfsPath != "" {
+			if interp := readELFInterpreter(cmd.Path); interp != "" {
+				interpHost := filepath.Join(app.RootfsPath, interp)
+				if _, err := os.Stat(interpHost); err == nil {
+					libDirs := findRootfsLibDirs(app.RootfsPath)
+					newArgv := []string{interpHost}
+					if len(libDirs) > 0 {
+						newArgv = append(newArgv, "--library-path", strings.Join(libDirs, ":"))
+					}
+					newArgv = append(newArgv, argv...)
+					cmd.Path = interpHost
+					cmd.Args = newArgv
+				}
+			}
+		}
 	}
 
 	// Isolated env — no parent-process variables leak into the app.
 	cmd.Env = buildEnv(app.EnvVars)
+
+	// In non-chroot mode also inject LD_LIBRARY_PATH so that any secondary
+	// dynamic loading (Python's ctypes, Node native addons, dlopen calls)
+	// can find image libraries without going through the linker invocation.
+	if !useChroot && app.RootfsPath != "" {
+		cmd.Env = injectLibPaths(cmd.Env, app.RootfsPath)
+	}
 
 	// Platform-specific: process group + optional chroot.
 	chrootPath := ""
@@ -151,6 +195,72 @@ func buildEnv(appEnv []store.EnvVar) []string {
 		env = append(env, "HOME=/root")
 	}
 	return env
+}
+
+// findRootfsLibDirs returns all library directories that exist in the rootfs,
+// covering the conventions used by Debian, Ubuntu, Alpine, and RHEL families.
+func findRootfsLibDirs(rootfsPath string) []string {
+	candidates := []string{
+		"lib", "lib64",
+		"usr/lib", "usr/lib64",
+		"usr/local/lib",
+		// Debian / Ubuntu multiarch
+		"lib/x86_64-linux-gnu", "lib/aarch64-linux-gnu",
+		"usr/lib/x86_64-linux-gnu", "usr/lib/aarch64-linux-gnu",
+	}
+	var found []string
+	for _, d := range candidates {
+		p := filepath.Join(rootfsPath, d)
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			found = append(found, p)
+		}
+	}
+	return found
+}
+
+// injectLibPaths prepends the image's library directories to LD_LIBRARY_PATH
+// so secondary dynamic loading (ctypes, dlopen, native addons) works without
+// the explicit linker invocation.
+func injectLibPaths(env []string, rootfsPath string) []string {
+	dirs := findRootfsLibDirs(rootfsPath)
+	if len(dirs) == 0 {
+		return env
+	}
+	extra := strings.Join(dirs, ":")
+	for i, e := range env {
+		if strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
+			existing := strings.TrimPrefix(e, "LD_LIBRARY_PATH=")
+			if existing != "" {
+				env[i] = "LD_LIBRARY_PATH=" + extra + ":" + existing
+			} else {
+				env[i] = "LD_LIBRARY_PATH=" + extra
+			}
+			return env
+		}
+	}
+	return append(env, "LD_LIBRARY_PATH="+extra)
+}
+
+// readELFInterpreter returns the dynamic linker path embedded in an ELF binary
+// (the PT_INTERP segment), e.g. "/lib/ld-musl-x86_64.so.1".
+// Returns "" for static binaries, non-ELF files, or unreadable files.
+func readELFInterpreter(binaryPath string) string {
+	f, err := elf.Open(binaryPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			buf := make([]byte, p.Filesz)
+			if _, err := p.ReadAt(buf, 0); err != nil {
+				return ""
+			}
+			// PT_INTERP is a null-terminated string.
+			return strings.TrimRight(string(buf), "\x00")
+		}
+	}
+	return "" // static binary — no interpreter needed
 }
 
 // lookPathInRootfs resolves a command name within the extracted rootfs.
