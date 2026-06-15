@@ -1,7 +1,7 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
 # Always run on the host (builder) platform.
 # TARGETOS / TARGETARCH are injected by Buildx for the target platform.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.7-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

@@ -28,6 +28,9 @@
       <span class="sys-stats-sep">|</span>
       <span id="stat-ram" title="Host RAM usage">RAM —</span>
     </div>
+    {{$ngrokURL := ngrokURL}}{{if $ngrokURL}}
+    <a href="{{$ngrokURL}}" target="_blank" rel="noopener" class="ngrok-badge" title="ngrok tunnel active — click to open public URL">🔗 ngrok</a>
+    {{end}}
     <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
   </div>
 </nav>

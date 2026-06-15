@@ -13,6 +13,7 @@ import (
 	"apphive/internal/runtime"
 	"apphive/internal/store"
 	"apphive/internal/sysinfo"
+	"apphive/internal/tunnel"
 )
 
 // Server holds all shared dependencies for the HTTP handlers.
@@ -24,6 +25,7 @@ type Server struct {
 	dataDir  string
 	regCreds *registry.Credentials
 	sampler  *sysinfo.Sampler
+	tunnel   *tunnel.Manager
 	innerMux *http.ServeMux // protected routes — built once at startup
 }
 
@@ -36,11 +38,14 @@ func NewServer(
 	dataDir string,
 	regCreds *registry.Credentials,
 	sampler *sysinfo.Sampler,
+	tunMgr *tunnel.Manager,
 ) *Server {
 	funcs := template.FuncMap{
 		"statusClass": statusClass,
 		"maskValue":   maskValue,
 		"formatTime":  formatTime,
+		// ngrokURL returns the live public URL when a tunnel is active, or "".
+		"ngrokURL": func() string { return tunMgr.URL() },
 	}
 
 	// Parse each page together with the layout so {{block}} inheritance works
@@ -68,6 +73,7 @@ func NewServer(
 		dataDir:  dataDir,
 		regCreds: regCreds,
 		sampler:  sampler,
+		tunnel:   tunMgr,
 	}
 	srv.innerMux = srv.buildProtectedMux()
 	return srv

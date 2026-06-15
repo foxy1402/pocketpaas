@@ -6,6 +6,59 @@ daemon required.
 
 ---
 
+## Install inside an SSH container
+
+If you have SSH access to a container but no Docker access (e.g. a free tier
+slot on Railway, Render, Fly.io, or similar), install directly inside the
+container:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/foxy1402/pocketpaas/main/install.sh | sh
+```
+
+The script:
+1. Downloads a pre-built binary matching your arch (`amd64` or `arm64`), or
+   falls back to building from source (auto-installs Go if needed).
+2. Creates `~/.pocketpaas/start.sh` — a small shell script that holds your
+   credentials and is your single launch point.
+
+**After installing:**
+
+```bash
+# 1. Open the start script and fill in your values
+nano ~/.pocketpaas/start.sh
+
+# 2. Start pocketpaas
+sh ~/.pocketpaas/start.sh
+
+# 3. Keep it running after you disconnect
+nohup sh ~/.pocketpaas/start.sh > ~/.pocketpaas/pocketpaas.log 2>&1 &
+echo "PID=$!"
+```
+
+The start script template looks like this — edit it once:
+
+```sh
+DASHBOARD_PASSWORD="changeme"
+NGROK_AUTHTOKEN=""      # paste your token here to get a public URL
+NGROK_DOMAIN=""         # optional: your free static ngrok domain
+```
+
+Once `NGROK_AUTHTOKEN` is set, pocketpaas prints a public URL to the log:
+
+```
+ngrok: tunnel active → https://your-app.ngrok-free.app
+ngrok: dashboard is reachable at https://your-app.ngrok-free.app
+```
+
+Open that URL in any browser — no port forwarding needed. Get a free auth
+token and a free static domain at <https://dashboard.ngrok.com>.
+
+> **Security:** pocketpaas is authenticated with `DASHBOARD_PASSWORD`. Use a
+> strong password whenever the dashboard is reachable from the public internet.
+
+---
+
 ## Quick Start (Docker)
 
 ```bash
@@ -41,11 +94,12 @@ docker run -d \
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DASHBOARD_PASSWORD` | **Yes** | — | Login password for the dashboard |
-| `DATA_DIR` | No | `/data` | Where SQLite DB and app rootfs dirs are stored |
+| `DATA_DIR` | No | auto | `/data` when writable (Docker); `~/.pocketpaas/data` otherwise |
 | `PORT` | No | `8080` | HTTP listen port |
-| `LOG_LEVEL` | No | `info` | Verbosity: `debug`, `info`, `warn`, `error` |
 | `REGISTRY_USER` | No | — | Username for private registry auth |
 | `REGISTRY_PASSWORD` | No | — | Password for private registry auth |
+| `NGROK_AUTHTOKEN` | No | — | Enables a public ngrok tunnel (get free at dashboard.ngrok.com) |
+| `NGROK_DOMAIN` | No | — | Optional static ngrok hostname, e.g. `my-app.ngrok-free.app` |
 
 ---
 

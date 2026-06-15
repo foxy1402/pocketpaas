@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"apphive/internal/runtime"
 	"apphive/internal/store"
 	"apphive/internal/sysinfo"
+	"apphive/internal/tunnel"
 )
 
 //go:embed all:web
@@ -32,8 +34,11 @@ func main() {
 		log.Fatal("DASHBOARD_PASSWORD environment variable is required")
 	}
 
-	dataDir := envOrDefault("DATA_DIR", "/data")
+	dataDir := envOrDefault("DATA_DIR", autoDataDir())
 	port := envOrDefault("PORT", "8080")
+
+	ngrokToken := os.Getenv("NGROK_AUTHTOKEN")
+	ngrokDomain := os.Getenv("NGROK_DOMAIN")
 
 	regCreds := &registry.Credentials{
 		Username: os.Getenv("REGISTRY_USER"),
@@ -60,6 +65,12 @@ func main() {
 		log.Printf("warn: reset running status: %v", err)
 	}
 
+	// Tunnel manager — nil (no-op) when NGROK_AUTHTOKEN is not set.
+	var tunMgr *tunnel.Manager
+	if ngrokToken != "" {
+		tunMgr = &tunnel.Manager{}
+	}
+
 	// Bootstrap runtime manager.
 	mgr := runtime.NewManager(appStore, dataDir)
 
@@ -79,8 +90,13 @@ func main() {
 
 	// Build HTTP server.
 	mux := http.NewServeMux()
-	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler)
+	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler, tunMgr)
 	srv.RegisterRoutes(mux, webFS)
+
+	// Start ngrok tunnel (no-op when NGROK_AUTHTOKEN is not set).
+	if tunMgr != nil {
+		tunMgr.Start(context.Background(), mux, ngrokToken, ngrokDomain)
+	}
 
 	// Auto-start apps that have the flag set (only meaningful with persistent storage).
 	autoStartApps(appStore, mgr)
@@ -132,4 +148,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// autoDataDir picks a writable data directory without requiring configuration.
+// It prefers /data (Docker volume convention), and falls back to
+// ~/.pocketpaas/data (SSH / non-root container scenario).
+func autoDataDir() string {
+	// /data is already a directory we can use (Docker volume mount).
+	if err := os.MkdirAll("/data", 0755); err == nil {
+		return "/data"
+	}
+	// No write access to / — use the user's home directory instead.
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".pocketpaas", "data")
+	}
+	// Last resort: a directory next to wherever we were started from.
+	return "pocketpaas-data"
 }
