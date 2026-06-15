@@ -71,6 +71,14 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 				argv[i] = a
 			}
 		}
+		// If argv[0] is a bare name (e.g. "node", "python3") resolve it
+		// inside the rootfs — otherwise exec.CommandContext would search
+		// the HOST PATH and exec the wrong (or no) binary.
+		if app.RootfsPath != "" && !filepath.IsAbs(argv[0]) {
+			if resolved := lookPathInRootfs(argv[0], app.RootfsPath); filepath.IsAbs(resolved) {
+				argv[0] = filepath.Join(app.RootfsPath, resolved)
+			}
+		}
 		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
 
 		if app.RootfsPath != "" {
