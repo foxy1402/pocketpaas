@@ -71,6 +71,16 @@
           {{if $app.HealthEndpoint}}<div class="info-row"><span class="info-label">Health</span><span class="info-value text-mono">{{$app.HealthEndpoint}}</span></div>{{end}}
           <div class="info-row"><span class="info-label">Auto-start</span><span class="info-value">{{if $app.AutoStart}}Yes{{else}}No{{end}}</span></div>
           <div class="info-row"><span class="info-label">Prune after start</span><span class="info-value">{{if $app.PruneAfterStart}}Yes{{else}}No{{end}}</span></div>
+          {{if eq $app.Status "running"}}{{$st := .AppStat}}{{if $st.RAMMB}}
+          <div class="info-row">
+            <span class="info-label">CPU</span>
+            <span class="info-value">{{printf "%.1f" $st.CPUPct}}%</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">RAM</span>
+            <span class="info-value">{{printf "%.0f" $st.RAMMB}} MB</span>
+          </div>
+          {{end}}{{end}}
           <div class="info-row"><span class="info-label">Last Started</span><span class="info-value">{{formatTime $app.LastStarted}}</span></div>
         </div>
       </div>

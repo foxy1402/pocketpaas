@@ -15,6 +15,7 @@ import (
 
 	"apphive/internal/auth"
 	"apphive/internal/registry"
+	"apphive/internal/runtime"
 	"apphive/internal/store"
 )
 
@@ -55,9 +56,16 @@ func (srv *Server) listApps(w http.ResponseWriter, r *http.Request) {
 		srv.serverError(w, err)
 		return
 	}
+	statsMap := make(map[string]runtime.AppStat, len(apps))
+	for _, app := range apps {
+		if app.Status == store.StatusRunning {
+			statsMap[app.ID] = srv.manager.AppStat(app.ID)
+		}
+	}
 	srv.render(w, "apps.html", map[string]any{
-		"Apps":    apps,
-		"Manager": srv.manager,
+		"Apps":     apps,
+		"Manager":  srv.manager,
+		"AppStats": statsMap,
 	})
 }
 
@@ -122,6 +130,7 @@ func (srv *Server) getAppDetail(w http.ResponseWriter, r *http.Request) {
 		"App":          app,
 		"Manager":      srv.manager,
 		"HealthStatus": srv.manager.HealthStatus(app.ID).String(),
+		"AppStat":      srv.manager.AppStat(app.ID),
 	})
 }
 
