@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -39,8 +40,8 @@ func (srv *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) getLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("apphive_session"); err == nil {
-		srv.auth.DeleteSession(c.Value)
+	if token := auth.TokenFromRequest(r); token != "" {
+		srv.auth.DeleteSession(token)
 	}
 	auth.ClearCookie(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -149,6 +150,9 @@ func (srv *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 
 // ---- Pull ----
 
+// pullTimeout is the maximum time allowed for a single image pull+extract.
+const pullTimeout = 30 * time.Minute
+
 // runPull executes a full pull+extract cycle for one app, sending progress to ch.
 // It is shared between single-app and pull-all flows.
 func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existingCMD []string, existingWorkDir string, ch chan<- string) {
@@ -157,7 +161,10 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 		creds = srv.regCreds
 	}
 
-	img, err := registry.Pull(imageRef, creds, ch)
+	ctx, cancel := context.WithTimeout(context.Background(), pullTimeout)
+	defer cancel()
+
+	img, err := registry.Pull(ctx, imageRef, creds, ch)
 	if err != nil {
 		ch <- "ERROR: " + err.Error()
 		_ = srv.store.UpdateStatus(appID, store.StatusError)
@@ -248,6 +255,9 @@ func (srv *Server) getPullProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
+
 	for {
 		select {
 		case line, ok := <-ch:
@@ -256,7 +266,14 @@ func (srv *Server) getPullProgress(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", escapeLine(line))
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", escapeLine(line)); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-ping.C:
+			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return

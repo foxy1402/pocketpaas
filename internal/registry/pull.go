@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -16,25 +17,33 @@ type Credentials struct {
 }
 
 // Pull fetches an OCI image by reference. Sends progress messages to the
-// progress channel. The caller owns the channel and must close it.
-func Pull(imageRef string, creds *Credentials, progress chan<- string) (v1.Image, error) {
-	progress <- fmt.Sprintf("Resolving %s …", imageRef)
+// progress channel (non-blocking — messages are dropped if the channel is full).
+// The caller owns the channel and must close it.
+// ctx is used to cancel/timeout the remote HTTP calls.
+func Pull(ctx context.Context, imageRef string, creds *Credentials, progress chan<- string) (v1.Image, error) {
+	sendProgress(progress, fmt.Sprintf("Resolving %s …", imageRef))
 
 	ref, err := name.ParseReference(imageRef)
 	if err != nil {
 		return nil, fmt.Errorf("parse image ref %q: %w", imageRef, err)
 	}
 
-	opts := []remote.Option{remote.WithAuthFromKeychain(authn.DefaultKeychain)}
+	opts := []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+	}
 	if creds != nil && creds.Username != "" {
 		auth := authn.FromConfig(authn.AuthConfig{
 			Username: creds.Username,
 			Password: creds.Password,
 		})
-		opts = []remote.Option{remote.WithAuth(auth)}
+		opts = []remote.Option{
+			remote.WithContext(ctx),
+			remote.WithAuth(auth),
+		}
 	}
 
-	progress <- "Fetching image manifest …"
+	sendProgress(progress, "Fetching image manifest …")
 	img, err := remote.Image(ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch image: %w", err)
@@ -44,7 +53,7 @@ func Pull(imageRef string, creds *Credentials, progress chan<- string) (v1.Image
 	if err != nil {
 		return nil, fmt.Errorf("list layers: %w", err)
 	}
-	progress <- fmt.Sprintf("Image has %d layer(s). Downloading …", len(layers))
+	sendProgress(progress, fmt.Sprintf("Image has %d layer(s). Starting download …", len(layers)))
 
 	return img, nil
 }
@@ -57,4 +66,13 @@ func ImageConfig(img v1.Image) (entrypoint []string, cmd []string, workDir strin
 		return nil, nil, "", fmt.Errorf("read image config: %w", err)
 	}
 	return cfg.Config.Entrypoint, cfg.Config.Cmd, cfg.Config.WorkingDir, nil
+}
+
+// sendProgress sends msg to ch without blocking.
+// If the channel buffer is full (e.g. SSE client disconnected), the message is dropped.
+func sendProgress(ch chan<- string, msg string) {
+	select {
+	case ch <- msg:
+	default:
+	}
 }

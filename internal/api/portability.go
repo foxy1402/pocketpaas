@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,7 +25,7 @@ func (srv *Server) getExport(w http.ResponseWriter, r *http.Request) {
 		srv.serverError(w, err)
 		return
 	}
-	filename := fmt.Sprintf("apphive-export-%s.json", time.Now().UTC().Format("20060102-150405"))
+	filename := fmt.Sprintf("pocketpaas-export-%s.json", time.Now().UTC().Format("20060102-150405"))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	w.Write(data)
@@ -218,8 +219,11 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			}
 		}()
 
-		img, err := registry.Pull(app.ImageRef, creds, pullCh)
+		// Context covers both manifest fetch AND layer downloads — cancel only after Extract.
+		pullCtx, pullCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		img, err := registry.Pull(pullCtx, app.ImageRef, creds, pullCh)
 		if err != nil {
+			pullCancel()
 			close(pullCh)
 			<-pullRelayed
 			dlog.Write("│  ✗ Pull failed: " + err.Error())
@@ -229,6 +233,7 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			continue
 		}
 		if err := registry.Extract(img, destDir, pullCh); err != nil {
+			pullCancel()
 			close(pullCh)
 			<-pullRelayed
 			dlog.Write("│  ✗ Extract failed: " + err.Error())
@@ -237,6 +242,7 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			_ = srv.store.UpdateStatus(app.ID, store.StatusError)
 			continue
 		}
+		pullCancel()
 		close(pullCh)
 		<-pullRelayed
 

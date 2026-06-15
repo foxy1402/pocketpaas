@@ -12,7 +12,7 @@ import (
 )
 
 // Extract writes the image's flattened filesystem to destDir.
-// It sends progress messages to the progress channel.
+// It sends progress messages to the progress channel (non-blocking).
 func Extract(img v1.Image, destDir string, progress chan<- string) error {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("create dest dir: %w", err)
@@ -26,11 +26,12 @@ func Extract(img v1.Image, destDir string, progress chan<- string) error {
 	cleanDest := filepath.Clean(destDir) + string(filepath.Separator)
 
 	for i, layer := range layers {
-		progress <- fmt.Sprintf("Extracting layer %d/%d …", i+1, len(layers))
+		sendProgress(progress, fmt.Sprintf("Downloading layer %d/%d …", i+1, len(layers)))
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			return fmt.Errorf("uncompress layer %d: %w", i+1, err)
 		}
+		sendProgress(progress, fmt.Sprintf("Extracting layer %d/%d …", i+1, len(layers)))
 		if err := extractTar(rc, destDir, cleanDest); err != nil {
 			rc.Close()
 			return fmt.Errorf("extract layer %d: %w", i+1, err)
@@ -38,7 +39,7 @@ func Extract(img v1.Image, destDir string, progress chan<- string) error {
 		rc.Close()
 	}
 
-	progress <- "Extraction complete."
+	sendProgress(progress, "Extraction complete.")
 	return nil
 }
 

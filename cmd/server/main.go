@@ -93,7 +93,7 @@ func main() {
 	if rev == "" {
 		rev = "dev"
 	}
-	log.Printf("apphive %s (built %s) listening on %s (data: %s)", rev, buildTime, addr, dataDir)
+	log.Printf("pocketpaas %s (built %s) listening on %s (data: %s)", rev, buildTime, addr, dataDir)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("listen: %v", err)
 	}

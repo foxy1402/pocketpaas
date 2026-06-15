@@ -94,8 +94,39 @@
           <div class="form-group">
             <div class="d-flex align-center" style="justify-content:space-between; margin-bottom:10px">
               <label class="form-label" style="margin:0">Environment Variables</label>
-              <button type="button" class="btn btn-ghost btn-sm" onclick="addEnvRow()">+ Add var</button>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="toggleBulkPanel()">⚡ Advanced</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="addEnvRow()">+ Add var</button>
+              </div>
             </div>
+
+            <!-- Bulk paste panel -->
+            <div id="bulk-panel" style="display:none;background:var(--bg);border:1px solid var(--accent);border-radius:6px;padding:14px;margin-bottom:12px">
+              <div class="d-flex align-center" style="justify-content:space-between;margin-bottom:8px">
+                <span style="font-size:13px;font-weight:600;color:var(--text)">Paste env vars (KEY=VALUE per line)</span>
+                <button type="button" class="btn btn-ghost btn-xs" onclick="document.getElementById('bulk-input').value=''">Clear</button>
+              </div>
+              <textarea
+                id="bulk-input"
+                class="form-control"
+                rows="7"
+                style="font-family:monospace;font-size:12px;resize:vertical;white-space:pre"
+                placeholder="DASHBOARD_PASSWORD=123456789
+DB_URL=postgres://user:pass@host/db
+SECRET_KEY=abc123
+
+# Lines starting with # are ignored
+# export KEY=VALUE is also supported
+# Existing keys are updated, new ones are appended"></textarea>
+              <div style="margin-top:10px;font-size:11px;color:var(--text);opacity:.5;margin-bottom:8px">
+                Supports: <code>KEY=VALUE</code> · <code>export KEY="value"</code> · <code>#&nbsp;comments</code> · duplicate keys are updated in-place
+              </div>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-primary btn-sm" onclick="applyBulkEnv()">Apply vars</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="toggleBulkPanel()">Cancel</button>
+              </div>
+            </div>
+
             <div id="env-list" class="env-list">
               {{range $app.EnvVars}}
               <div class="env-row">
@@ -123,4 +154,108 @@
     </div>
   </div>
 </div>
+
+<script>
+function toggleBulkPanel() {
+  var p = document.getElementById('bulk-panel');
+  var visible = p.style.display !== 'none';
+  p.style.display = visible ? 'none' : 'block';
+  if (!visible) {
+    document.getElementById('bulk-input').focus();
+  }
+}
+
+function applyBulkEnv() {
+  var text = document.getElementById('bulk-input').value;
+  var lines = text.split('\n');
+  var applied = 0;
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+
+    // Skip blank lines and comments
+    if (!line || line.charAt(0) === '#') continue;
+
+    // Strip leading "export "
+    if (line.indexOf('export ') === 0) {
+      line = line.slice(7).trim();
+    }
+
+    // Split on first '=' only
+    var eqIdx = line.indexOf('=');
+    if (eqIdx < 1) continue; // no '=' or empty key
+
+    var key = line.slice(0, eqIdx).trim();
+    var value = line.slice(eqIdx + 1);
+
+    // Strip surrounding matching quotes (single or double)
+    if (value.length >= 2) {
+      var q = value.charAt(0);
+      if ((q === '"' || q === "'") && value.charAt(value.length - 1) === q) {
+        value = value.slice(1, -1);
+      }
+    }
+
+    if (!key) continue;
+
+    // Update existing row with same key, or append a new one
+    var existing = null;
+    var keyInputs = document.querySelectorAll('#env-list .env-key');
+    for (var j = 0; j < keyInputs.length; j++) {
+      if (keyInputs[j].value === key) {
+        existing = keyInputs[j];
+        break;
+      }
+    }
+
+    if (existing) {
+      existing.closest('.env-row').querySelector('.env-value').value = value;
+    } else {
+      addEnvRowWith(key, value);
+    }
+    applied++;
+  }
+
+  // Close panel and clear textarea after apply
+  document.getElementById('bulk-panel').style.display = 'none';
+  document.getElementById('bulk-input').value = '';
+
+  if (applied === 0) {
+    showToast('No valid KEY=VALUE lines found.', 'error');
+  } else {
+    showToast('Applied ' + applied + ' env var' + (applied !== 1 ? 's' : '') + '.', 'success');
+  }
+}
+
+function addEnvRowWith(key, value) {
+  var list = document.getElementById('env-list');
+  var row = document.createElement('div');
+  row.className = 'env-row';
+
+  var keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.name = 'env_key';
+  keyInput.className = 'form-control env-key';
+  keyInput.placeholder = 'KEY';
+  keyInput.value = key;
+
+  var valInput = document.createElement('input');
+  valInput.type = 'text';
+  valInput.name = 'env_value';
+  valInput.className = 'form-control env-value';
+  valInput.placeholder = 'value';
+  valInput.value = value;
+
+  var delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'btn btn-ghost btn-sm';
+  delBtn.textContent = '✕';
+  delBtn.onclick = function() { row.remove(); };
+
+  row.appendChild(keyInput);
+  row.appendChild(valInput);
+  row.appendChild(delBtn);
+  list.appendChild(row);
+}
+</script>
 {{end}}

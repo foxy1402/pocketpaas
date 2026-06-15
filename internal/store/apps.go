@@ -164,21 +164,33 @@ func (s *AppStore) List() ([]*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
+	// Collect all apps first, then close the rows before fetching env vars.
+	// This avoids a deadlock: with MaxOpenConns(1), the outer rows hold the
+	// single connection; calling getEnvVars() while rows is open would block
+	// forever waiting for that same connection to be released.
 	var apps []*App
 	for rows.Next() {
 		app, err := scanApp(rows)
 		if err != nil {
-			return nil, err
-		}
-		app.EnvVars, err = s.getEnvVars(app.ID)
-		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		apps = append(apps, app)
 	}
-	return apps, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close() // release the connection before nested queries
+
+	for _, app := range apps {
+		app.EnvVars, err = s.getEnvVars(app.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return apps, nil
 }
 
 func (s *AppStore) Delete(id string) error {

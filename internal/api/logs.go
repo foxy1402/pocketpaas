@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // getLogsSSE streams the app's log buffer as Server-Sent Events.
@@ -33,13 +34,26 @@ func (srv *Server) getLogsSSE(w http.ResponseWriter, r *http.Request) {
 	sub := buf.Subscribe()
 	defer buf.Unsubscribe(sub)
 
+	// Keepalive ticker: writes a comment every 25 s.
+	// If the write fails (proxy dropped the connection but didn't signal the context),
+	// we return, freeing this goroutine and its subscription.
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
+
 	for {
 		select {
 		case line, ok := <-sub:
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", escapeLine(line))
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", escapeLine(line)); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-ping.C:
+			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
