@@ -64,12 +64,6 @@
           <td><span class="app-image" title="{{.ImageRef}}">{{.ImageRef}}</span></td>
           <td>
             <span class="badge {{statusClass .Status}}">{{.Status}}</span>
-            {{if eq .Status "running"}}
-            {{$st := index $.AppStats .ID}}{{if $st.RAMMB}}
-            <div style="font-size:10px;color:var(--muted);margin-top:2px">
-              {{printf "%.0f" $st.CPUPct}}%&thinsp;·&thinsp;{{printf "%.0f" $st.RAMMB}}&thinsp;MB
-            </div>
-            {{end}}{{end}}
           </td>
           <td>
             {{if .ExposedPort}}

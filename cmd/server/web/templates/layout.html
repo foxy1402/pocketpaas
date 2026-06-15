@@ -24,9 +24,9 @@
   </div>
   <div class="nav-end d-flex align-center gap-3">
     <div id="sys-stats" class="sys-stats">
-      <span id="stat-cpu" title="System-wide CPU usage (entire host container)">Host CPU —</span>
+      <span id="stat-cpu" title="Host CPU usage">CPU —</span>
       <span class="sys-stats-sep">|</span>
-      <span id="stat-ram" title="System-wide RAM usage (entire host container)">Host RAM —</span>
+      <span id="stat-ram" title="Host RAM usage">RAM —</span>
     </div>
     <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
   </div>
@@ -122,11 +122,11 @@ function clearLogView() {
       var ramEl = document.getElementById('stat-ram');
       if (cpuEl) {
         var pct = d.cpu_pct.toFixed(0);
-        cpuEl.textContent = 'Host ' + pct + '%';
+        cpuEl.textContent = 'CPU ' + pct + '%';
         cpuEl.style.color = d.cpu_pct > 80 ? 'var(--red)' : d.cpu_pct > 50 ? 'var(--yellow)' : '';
       }
       if (ramEl && d.ram_total_mb > 0) {
-        ramEl.textContent = 'Host ' + d.ram_used_mb + '/' + d.ram_total_mb + 'MB';
+        ramEl.textContent = 'RAM ' + d.ram_used_mb + '/' + d.ram_total_mb + 'MB';
         var pct = d.ram_used_mb / d.ram_total_mb;
         ramEl.style.color = pct > 0.85 ? 'var(--red)' : pct > 0.65 ? 'var(--yellow)' : '';
       }

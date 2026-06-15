@@ -8,20 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"apphive/internal/sysinfo"
 	"apphive/internal/store"
 )
-
-// AppStat holds a per-process resource snapshot (CPU % and RSS in MB).
-type AppStat struct {
-	CPUPct float64
-	RAMMB  float64
-}
-
-type procTick struct {
-	ticks uint64
-	at    time.Time
-}
 
 // HealthState represents the last known health check result.
 type HealthState int
@@ -60,91 +48,18 @@ type Manager struct {
 	deploy  *DeployState                   // non-nil when deploy is active or recently done
 	store   *store.AppStore
 	dataDir string
-
-	statsMu   sync.RWMutex
-	procStats map[string]AppStat  // appID -> latest resource snapshot
-	prevTicks map[string]procTick // appID -> previous CPU tick sample
 }
 
 func NewManager(s *store.AppStore, dataDir string) *Manager {
-	m := &Manager{
-		procs:     make(map[string]*Process),
-		logs:      make(map[string]*LogBuffer),
-		health:    make(map[string]HealthState),
-		pulls:     make(map[string]chan string),
-		pingers:   make(map[string]context.CancelFunc),
-		procStats: make(map[string]AppStat),
-		prevTicks: make(map[string]procTick),
-		store:     s,
-		dataDir:   dataDir,
+	return &Manager{
+		procs:   make(map[string]*Process),
+		logs:    make(map[string]*LogBuffer),
+		health:  make(map[string]HealthState),
+		pulls:   make(map[string]chan string),
+		pingers: make(map[string]context.CancelFunc),
+		store:   s,
+		dataDir: dataDir,
 	}
-	go m.statsPoll()
-	return m
-}
-
-// statsPoll runs in the background and refreshes per-app stats every 5 s.
-func (m *Manager) statsPoll() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		m.updateProcStats()
-	}
-}
-
-// updateProcStats samples /proc/{pid}/stat for every running process.
-func (m *Manager) updateProcStats() {
-	m.mu.Lock()
-	pids := make(map[string]int, len(m.procs))
-	for id, proc := range m.procs {
-		pids[id] = proc.pid()
-	}
-	m.mu.Unlock()
-
-	now := time.Now()
-
-	m.statsMu.RLock()
-	prev := m.prevTicks
-	m.statsMu.RUnlock()
-
-	newStats := make(map[string]AppStat, len(pids))
-	newTicks := make(map[string]procTick, len(pids))
-
-	for appID, pid := range pids {
-		if pid <= 0 {
-			continue
-		}
-		ticks, rssKB, err := sysinfo.ReadProcStat(pid)
-		if err != nil {
-			continue
-		}
-		stat := AppStat{RAMMB: float64(rssKB) / 1024.0}
-		if p, ok := prev[appID]; ok && p.ticks > 0 {
-			elapsed := now.Sub(p.at).Seconds()
-			if elapsed >= 0.5 {
-				delta := int64(ticks) - int64(p.ticks)
-				if delta > 0 {
-					stat.CPUPct = float64(delta) / (elapsed * float64(sysinfo.ClkTck())) * 100
-					if stat.CPUPct > 100 {
-						stat.CPUPct = 100
-					}
-				}
-			}
-		}
-		newStats[appID] = stat
-		newTicks[appID] = procTick{ticks: ticks, at: now}
-	}
-
-	m.statsMu.Lock()
-	m.procStats = newStats
-	m.prevTicks = newTicks
-	m.statsMu.Unlock()
-}
-
-// AppStat returns the latest CPU/RAM snapshot for appID, or zero if unavailable.
-func (m *Manager) AppStat(appID string) AppStat {
-	m.statsMu.RLock()
-	defer m.statsMu.RUnlock()
-	return m.procStats[appID]
 }
 
 // StartDeploy marks the start of a sequential deploy and returns its state.
