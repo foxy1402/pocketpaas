@@ -75,17 +75,79 @@ printf '  Binary   : %s\n'    "$BIN"
 printf '  Data dir : %s/data\n' "$CFG_DIR"
 printf '\n'
 
+# ── Existing install detection ─────────────────────────────────────────────────
+WAS_RUNNING=""
+UPDATE_ONLY=""
+PREV_PASSWORD=""
+PREV_PORT=""
+PREV_NGROK_AUTHTOKEN=""
+PREV_NGROK_DOMAIN=""
+
+# Check if pocketpaas is currently running.
+if pgrep -xf "$BIN" >/dev/null 2>&1; then
+  WAS_RUNNING=1
+  printf '  ⚠  pocketpaas is currently running.\n'
+  _stop="$(ask 'Stop it before updating? (Y/n)' 'y')"
+  case "$_stop" in
+    n|N) printf '  Continuing without stopping.\n' ;;
+    *)
+      pkill -xf "$BIN" 2>/dev/null || true
+      sleep 1
+      printf '  Stopped.\n'
+      ;;
+  esac
+  printf '\n'
+fi
+
+# Check for existing configuration.
+if [ -f "$START_SCRIPT" ]; then
+  # Parse existing values from the generated start.sh.
+  PREV_PASSWORD="$(sed -n 's/^DASHBOARD_PASSWORD=//p' "$START_SCRIPT" | sed "s/^'//;s/'$//" | sed "s/'\\\\''/'/g")"
+  PREV_PORT="$(sed -n 's/^PORT=//p' "$START_SCRIPT" | tr -d '"')"
+  PREV_NGROK_AUTHTOKEN="$(sed -n 's/^NGROK_AUTHTOKEN=//p' "$START_SCRIPT" | sed "s/^'//;s/'$//" | sed "s/'\\\\''/'/g")"
+  PREV_NGROK_DOMAIN="$(sed -n 's/^NGROK_DOMAIN=//p' "$START_SCRIPT" | sed "s/^'//;s/'$//" | sed "s/'\\\\''/'/g")"
+
+  printf '  Existing config found:\n'
+  printf '    Port       : %s\n' "$PREV_PORT"
+  printf '    Password   : %s\n' "$(printf '%s' "$PREV_PASSWORD" | sed 's/./•/g')"
+  if [ -n "$PREV_NGROK_AUTHTOKEN" ]; then
+    printf '    ngrok token: %s\n' "$(printf '%s' "$PREV_NGROK_AUTHTOKEN" | sed 's/./•/g')"
+    printf '    ngrok domain: %s\n' "${PREV_NGROK_DOMAIN:-(auto)}"
+  else
+    printf '    ngrok      : (not configured)\n'
+  fi
+  printf '\n'
+
+  _mode="$(ask 'Update binary only? (Y/n)' 'y')"
+  case "$_mode" in
+    n|N) UPDATE_ONLY="" ;;
+    *)   UPDATE_ONLY=1 ;;
+  esac
+  printf '\n'
+fi
+
+if [ -n "$UPDATE_ONLY" ]; then
+  # Reuse existing config — skip interactive prompts.
+  DASHBOARD_PASSWORD="$PREV_PASSWORD"
+  PORT="$PREV_PORT"
+  NGROK_AUTHTOKEN="$PREV_NGROK_AUTHTOKEN"
+  NGROK_DOMAIN="$PREV_NGROK_DOMAIN"
+fi
+
 # ── Step 1 — dashboard config ─────────────────────────────────────────────────
+if [ -z "$UPDATE_ONLY" ]; then
+
 printf '  ── Step 1 of 2 : Dashboard ──────────────\n\n'
 
-DASHBOARD_PASSWORD="$(ask_secret 'Dashboard password' 'changeme')"
+_PW_DEFAULT="${PREV_PASSWORD:-changeme}"
+DASHBOARD_PASSWORD="$(ask_secret 'Dashboard password' "$_PW_DEFAULT")"
 while [ -z "$DASHBOARD_PASSWORD" ]; do
   printf '  Password cannot be empty.\n' >"$TTY"
   DASHBOARD_PASSWORD="$(ask_secret 'Dashboard password' '')"
 done
 
 while true; do
-  PORT="$(ask 'HTTP port' '8080')"
+  PORT="$(ask 'HTTP port' "${PREV_PORT:-8080}")"
   # Keep only digits; fall back to 8080 if blank
   PORT="$(printf '%s' "$PORT" | tr -cd '0-9')"
   [ -z "$PORT" ] && PORT=8080
@@ -119,7 +181,7 @@ printf '  Free token + static domain:\n'
 printf '  https://dashboard.ngrok.com\n'
 printf '\n'
 
-NGROK_AUTHTOKEN="$(ask_secret 'ngrok auth token' '')"
+NGROK_AUTHTOKEN="$(ask_secret 'ngrok auth token' "$PREV_NGROK_AUTHTOKEN")"
 
 NGROK_DOMAIN=""
 if [ -n "$NGROK_AUTHTOKEN" ]; then
@@ -128,10 +190,12 @@ if [ -n "$NGROK_AUTHTOKEN" ]; then
   printf '  across restarts (e.g. my-app.ngrok-free.app).\n'
   printf '  Leave blank for an auto-assigned URL.\n'
   printf '\n'
-  NGROK_DOMAIN="$(ask 'ngrok static domain' '')"
+  NGROK_DOMAIN="$(ask 'ngrok static domain' "$PREV_NGROK_DOMAIN")"
 fi
 
 printf '\n'
+
+fi # end of interactive config (UPDATE_ONLY)
 
 # ── Install binary ────────────────────────────────────────────────────────────
 mkdir -p "$CFG_DIR"
@@ -148,8 +212,9 @@ else
 
   # Install Go if missing
   if ! command -v go >/dev/null 2>&1; then
-    printf '==> Installing Go 1.25...\n'
-    curl -fsSL "https://go.dev/dl/go1.25.7.linux-$ARCH.tar.gz" | tar -C "$HOME" -xz
+    GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 || echo go1.23.4)"
+    printf '==> Installing %s...\n' "$GO_VERSION"
+    curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C "$HOME" -xz
     export PATH="$HOME/go/bin:$PATH"
     printf 'export PATH="$HOME/go/bin:$PATH"\n' >> "$HOME/.profile" 2>/dev/null || true
     printf '==> Go installed.\n'
@@ -214,5 +279,13 @@ printf '\n'
 if [ -n "$NGROK_AUTHTOKEN" ]; then
   printf '  After starting, your public URL appears in the log:\n'
   printf '    ngrok: tunnel active → https://...\n'
+  printf '\n'
+fi
+
+# ── Restart if was running ─────────────────────────────────────────────────────
+if [ -n "$WAS_RUNNING" ]; then
+  printf '  Restarting pocketpaas with new binary...\n'
+  nohup sh "$START_SCRIPT" > "$LOG_FILE" 2>&1 &
+  printf '  Restarted (PID %s). Log: %s\n' "$!" "$LOG_FILE"
   printf '\n'
 fi
