@@ -130,8 +130,31 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 						newArgv = append(newArgv, arg)
 					}
 					newArgv = append(newArgv, argv...)
-					cmd.Path = shellHost
-					cmd.Args = newArgv
+
+					// The shebang-resolved interpreter (e.g. /bin/sh) is
+					// typically a dynamically-linked ELF binary. It needs the
+					// same rootfs ld.so wrapping as direct ELF binaries —
+					// without it the host's ld.so loads the rootfs's libc,
+					// causing GLIBC_PRIVATE symbol mismatches.
+					if shellInterp := readELFInterpreter(shellHost); shellInterp != "" {
+						shellInterpHost := filepath.Join(app.RootfsPath, shellInterp)
+						if _, serr := os.Stat(shellInterpHost); serr == nil {
+							libDirs := findRootfsLibDirs(app.RootfsPath)
+							wrappedArgv := []string{shellInterpHost}
+							if len(libDirs) > 0 {
+								wrappedArgv = append(wrappedArgv, "--library-path", strings.Join(libDirs, ":"))
+							}
+							wrappedArgv = append(wrappedArgv, newArgv...)
+							cmd.Path = shellInterpHost
+							cmd.Args = wrappedArgv
+						} else {
+							cmd.Path = shellHost
+							cmd.Args = newArgv
+						}
+					} else {
+						cmd.Path = shellHost
+						cmd.Args = newArgv
+					}
 				}
 			}
 		}
