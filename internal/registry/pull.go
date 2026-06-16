@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -86,12 +87,14 @@ func pickPort(ports map[string]struct{}) int {
 			return p
 		}
 	}
-	// fallback: first numeric port found
-	for k := range ports {
-		p, _, _ := strings.Cut(k, "/")
-		if n, err := strconv.Atoi(p); err == nil && n > 0 {
-			return n
-		}
+	// fallback: lowest numeric port found (sorted for determinism).
+	allPorts := make([]int, 0, len(seen))
+	for p := range seen {
+		allPorts = append(allPorts, p)
+	}
+	sort.Ints(allPorts)
+	if len(allPorts) > 0 {
+		return allPorts[0]
 	}
 	return 0
 }

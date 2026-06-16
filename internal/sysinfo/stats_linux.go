@@ -40,7 +40,8 @@ func readMemStats() (totalMB, usedMB int64, err error) {
 	}
 	defer f.Close()
 
-	var memTotal, memAvailable int64
+	var memTotal, memFree, memAvailable, buffers, cached int64
+	var hasAvailable bool
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := sc.Text()
@@ -53,17 +54,29 @@ func readMemStats() (totalMB, usedMB int64, err error) {
 		switch key {
 		case "MemTotal":
 			memTotal = val
+		case "MemFree":
+			memFree = val
 		case "MemAvailable":
 			memAvailable = val
-		}
-		if memTotal > 0 && memAvailable > 0 {
-			break
+			hasAvailable = true
+		case "Buffers":
+			buffers = val
+		case "Cached":
+			cached = val
 		}
 	}
 	if memTotal == 0 {
 		return 0, 0, fmt.Errorf("MemTotal not found in /proc/meminfo")
 	}
 	totalMB = memTotal / 1024
-	usedMB = (memTotal - memAvailable) / 1024
+	if hasAvailable {
+		usedMB = (memTotal - memAvailable) / 1024
+	} else {
+		// Pre-3.14 kernels lack MemAvailable; approximate with MemFree + Buffers + Cached.
+		usedMB = (memTotal - memFree - buffers - cached) / 1024
+	}
+	if usedMB < 0 {
+		usedMB = 0
+	}
 	return totalMB, usedMB, nil
 }

@@ -56,6 +56,20 @@ func (b *LogBuffer) Subscribe() chan string {
 	return ch
 }
 
+// SubscribeWithHistory atomically returns a snapshot of all buffered lines and
+// registers a subscriber for future lines. The lock is held across both
+// operations so no lines can be written (and missed) between the snapshot and
+// the subscription.
+func (b *LogBuffer) SubscribeWithHistory() (history []string, sub chan string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	history = make([]string, len(b.lines))
+	copy(history, b.lines)
+	sub = make(chan string, 256)
+	b.subs = append(b.subs, sub)
+	return history, sub
+}
+
 // Unsubscribe removes a subscriber channel and closes it.
 func (b *LogBuffer) Unsubscribe(ch chan string) {
 	b.mu.Lock()

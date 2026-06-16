@@ -24,15 +24,15 @@ func (srv *Server) getLogsSSE(w http.ResponseWriter, r *http.Request) {
 
 	buf := srv.manager.LogBuffer(id)
 
+	// Atomically get buffered history and subscribe for new lines.
+	history, sub := buf.SubscribeWithHistory()
+	defer buf.Unsubscribe(sub)
+
 	// Send buffered history.
-	for _, line := range buf.Lines() {
+	for _, line := range history {
 		fmt.Fprintf(w, "data: %s\n\n", escapeLine(line))
 		flusher.Flush()
 	}
-
-	// Subscribe to new lines.
-	sub := buf.Subscribe()
-	defer buf.Unsubscribe(sub)
 
 	// Keepalive ticker: writes a comment every 25 s.
 	// If the write fails (proxy dropped the connection but didn't signal the context),

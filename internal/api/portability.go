@@ -278,6 +278,9 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 
 		// ── Start ──
 		dlog.Write("│  Starting app…")
+		if srv.manager.IsRunning(app.ID) {
+			_ = srv.manager.Stop(app.ID)
+		}
 		if err := srv.manager.Start(app.ID); err != nil {
 			dlog.Write("│  ✗ Start failed: " + err.Error())
 		} else {
