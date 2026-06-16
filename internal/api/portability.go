@@ -138,8 +138,12 @@ func (srv *Server) getDeployStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Flush history so a late-connecting client sees what already happened.
-	for _, line := range ds.Log.Lines() {
+	// Atomically grab all history lines and register for future lines so no
+	// lines are missed between the snapshot and the subscription.
+	history, sub := ds.Log.SubscribeWithHistory()
+	defer ds.Log.Unsubscribe(sub)
+
+	for _, line := range history {
 		fmt.Fprintf(w, "data: %s\n\n", escapeLine(line))
 	}
 	flusher.Flush()
@@ -152,9 +156,6 @@ func (srv *Server) getDeployStream(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 	}
-
-	sub := ds.Log.Subscribe()
-	defer ds.Log.Unsubscribe(sub)
 
 	for {
 		select {

@@ -166,8 +166,13 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	// In non-chroot mode also inject LD_LIBRARY_PATH so that any secondary
 	// dynamic loading (Python's ctypes, Node native addons, dlopen calls)
 	// can find image libraries without going through the linker invocation.
+	// Also rewrite PATH entries with the rootfs prefix so that subprocess
+	// exec calls (#!/usr/bin/env, shell scripts calling bare commands like
+	// pip/npm/node) resolve to host-accessible paths instead of rootfs-
+	// relative paths that don't exist on the host filesystem.
 	if !useChroot && app.RootfsPath != "" {
 		cmd.Env = injectLibPaths(cmd.Env, app.RootfsPath)
+		cmd.Env = prefixPathEnv(cmd.Env, app.RootfsPath)
 	}
 
 	// Platform-specific: process group + optional chroot.
@@ -282,6 +287,27 @@ func injectLibPaths(env []string, rootfsPath string) []string {
 		}
 	}
 	return append(env, "LD_LIBRARY_PATH="+extra)
+}
+
+// prefixPathEnv rewrites every entry in PATH by prepending rootfsPath, so that
+// bare-name exec lookups (execvp, #!/usr/bin/env, shell "command not found")
+// resolve to host-accessible absolute paths instead of rootfs-relative ones.
+// For example, "/usr/bin" becomes "/home/.../rootfs/usr/bin".
+func prefixPathEnv(env []string, rootfsPath string) []string {
+	for i, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			raw := strings.TrimPrefix(e, "PATH=")
+			parts := strings.Split(raw, ":")
+			for j, p := range parts {
+				if p != "" && filepath.IsAbs(p) {
+					parts[j] = filepath.Join(rootfsPath, p)
+				}
+			}
+			env[i] = "PATH=" + strings.Join(parts, ":")
+			return env
+		}
+	}
+	return env
 }
 
 // readELFInterpreter returns the dynamic linker path embedded in an ELF binary
