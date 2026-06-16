@@ -16,33 +16,40 @@ container:
 curl -fsSL https://raw.githubusercontent.com/foxy1402/pocketpaas/main/install.sh | sh
 ```
 
-The script:
-1. Downloads a pre-built binary matching your arch (`amd64` or `arm64`), or
-   falls back to building from source (auto-installs Go if needed).
-2. Creates `~/.pocketpaas/start.sh` — a small shell script that holds your
-   credentials and is your single launch point.
+The installer is fully interactive and will:
+1. Prompt for a dashboard password, HTTP port, and optional ngrok tunnel.
+2. Download a pre-built binary matching your arch (`amd64` or `arm64`), or
+   fall back to building from source (auto-installs the latest Go if needed).
+3. Generate `~/.pocketpaas/start.sh` with all your settings baked in.
 
 **After installing:**
 
 ```bash
-# 1. Open the start script and fill in your values
-nano ~/.pocketpaas/start.sh
-
-# 2. Start pocketpaas
+# Start pocketpaas
 sh ~/.pocketpaas/start.sh
 
-# 3. Keep it running after you disconnect
+# Keep it running after you disconnect
 nohup sh ~/.pocketpaas/start.sh > ~/.pocketpaas/pocketpaas.log 2>&1 &
 echo "PID=$!"
 ```
 
-The start script template looks like this — edit it once:
+### Updating
 
-```sh
-DASHBOARD_PASSWORD="changeme"
-NGROK_AUTHTOKEN=""      # paste your token here to get a public URL
-NGROK_DOMAIN=""         # optional: your free static ngrok domain
+Re-running the installer detects your existing config and running instance:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/foxy1402/pocketpaas/main/install.sh | sh
 ```
+
+- If pocketpaas is running, it offers to stop it before updating and
+  auto-restarts it with the new binary when done.
+- If a config exists, it asks **"Update binary only?"** — choosing yes
+  downloads the latest binary and preserves your password, port, and ngrok
+  settings without re-prompting.
+- Choosing no re-runs the interactive prompts with your previous values
+  pre-filled as defaults.
+
+### ngrok tunnel
 
 Once `NGROK_AUTHTOKEN` is set, pocketpaas prints a public URL to the log:
 
