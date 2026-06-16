@@ -109,7 +109,8 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		// Static binaries (Go, Rust/musl) have no PT_INTERP; they fall
 		// through and exec correctly as-is.
 		if app.RootfsPath != "" {
-			if interp := readELFInterpreter(cmd.Path); interp != "" {
+			interp := readELFInterpreter(cmd.Path)
+			if interp != "" {
 				interpHost := filepath.Join(app.RootfsPath, interp)
 				if _, err := os.Stat(interpHost); err == nil {
 					libDirs := findRootfsLibDirs(app.RootfsPath)
@@ -119,6 +120,17 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 					}
 					newArgv = append(newArgv, argv...)
 					cmd.Path = interpHost
+					cmd.Args = newArgv
+				}
+			} else if shell, arg := readShebang(cmd.Path); shell != "" {
+				shellHost := filepath.Join(app.RootfsPath, shell)
+				if _, err := os.Stat(shellHost); err == nil {
+					newArgv := []string{shellHost}
+					if arg != "" {
+						newArgv = append(newArgv, arg)
+					}
+					newArgv = append(newArgv, argv...)
+					cmd.Path = shellHost
 					cmd.Args = newArgv
 				}
 			}
@@ -269,6 +281,37 @@ func readELFInterpreter(binaryPath string) string {
 		}
 	}
 	return "" // static binary — no interpreter needed
+}
+
+// readShebang parses the #! line of a script and returns the interpreter path
+// and optional single argument (e.g. "/usr/bin/env", "python3" for #!/usr/bin/env python3).
+// Returns ("", "") for non-scripts or unreadable files.
+func readShebang(path string) (interp, arg string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	buf := make([]byte, 256)
+	n, _ := f.Read(buf)
+	line := string(buf[:n])
+	if !strings.HasPrefix(line, "#!") {
+		return "", ""
+	}
+	line = line[2:]
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(line, " ", 2)
+	interp = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		arg = strings.TrimSpace(parts[1])
+	}
+	return interp, arg
 }
 
 // lookPathInRootfs resolves a command name within the extracted rootfs.

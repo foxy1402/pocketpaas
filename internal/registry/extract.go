@@ -102,6 +102,12 @@ func extractTar(r io.Reader, destDir, cleanDest string) error {
 				return err
 			}
 			f.Close()
+			// os.OpenFile ignores the perm argument when the file already
+			// exists (a later layer overwriting an earlier one). Explicitly
+			// set the mode so the execute bit from the tar header is preserved.
+			if err := os.Chmod(dest, os.FileMode(hdr.Mode)); err != nil {
+				return err
+			}
 		case tar.TypeSymlink:
 			os.Remove(dest)
 			// Symlinks point inside the container; don't resolve against the host.
