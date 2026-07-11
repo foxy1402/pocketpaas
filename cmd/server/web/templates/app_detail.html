@@ -56,10 +56,10 @@
           {{if $app.Command}}<div class="info-row"><span class="info-label">Command</span><span class="info-value text-mono">{{range $app.Command}}{{.}} {{end}}</span></div>{{end}}
           {{if $app.WorkDir}}<div class="info-row"><span class="info-label">Work Dir</span><span class="info-value text-mono">{{$app.WorkDir}}</span></div>{{end}}
           {{if $app.RootfsPath}}<div class="info-row"><span class="info-label">Rootfs</span><span class="info-value text-mono" style="font-size:11px;opacity:.7">{{$app.RootfsPath}}</span></div>{{end}}
-          {{if and $app.PruneAfterStart (not $app.RootfsPath)}}
+          {{if not $app.RootfsPath}}
           <div class="info-row">
             <span class="info-label">Rootfs</span>
-            <span class="info-value" style="color:var(--yellow)" title="Deleted after start to save disk. Re-pull before restarting.">🗑 pruned (re-pull to restart)</span>
+            <span class="info-value" style="color:var(--yellow)" title="No extracted image filesystem is available. Pull before starting.">missing (pull required)</span>
           </div>
           {{end}}
           {{if $app.ExposedPort}}
@@ -70,7 +70,7 @@
           {{end}}
           {{if $app.HealthEndpoint}}<div class="info-row"><span class="info-label">Health</span><span class="info-value text-mono">{{$app.HealthEndpoint}}</span></div>{{end}}
           <div class="info-row"><span class="info-label">Auto-start</span><span class="info-value">{{if $app.AutoStart}}Yes{{else}}No{{end}}</span></div>
-          <div class="info-row"><span class="info-label">Prune after start</span><span class="info-value">{{if $app.PruneAfterStart}}Yes{{else}}No{{end}}</span></div>
+          <div class="info-row"><span class="info-label">Prune caches after start</span><span class="info-value">{{if $app.PruneAfterStart}}Yes{{else}}No{{end}}</span></div>
           <div class="info-row"><span class="info-label">Last Started</span><span class="info-value">{{formatTime $app.LastStarted}}</span></div>
         </div>
       </div>

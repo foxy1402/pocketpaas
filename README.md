@@ -115,8 +115,8 @@ docker run -d \
 **Ephemeral (no volume):**
 The database is wiped on every container restart. Use the **Portability** page
 to export your app configs before stopping the container, and import them after
-restarting. Then use **Sequential Deploy** to re-pull and start apps one by one
-without exhausting ephemeral storage.
+restarting. Then use **Sequential Deploy** to re-pull, start, and cache-prune
+apps one by one to reduce ephemeral storage pressure.
 
 **Persistent (with volume):**
 The database and rootfs directories survive restarts. Apps with
@@ -135,7 +135,7 @@ The database and rootfs directories survive restarts. Apps with
 - **Health checks** — optional HTTP ping every 15 s; shown as a status dot
 - **Export / Import** — plain JSON backup of all app configs and env vars
 - **Sequential Deploy** — import and deploy apps one by one (pull → start →
-  prune rootfs → next), preventing OOM on ephemeral storage
+  prune caches/docs → next), reducing ephemeral storage pressure
 - **System stats** — live CPU % and RAM usage displayed in the nav bar
 - **Auto-start** — apps can be configured to start automatically on dashboard
   boot (useful with persistent storage)

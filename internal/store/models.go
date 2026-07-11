@@ -30,7 +30,7 @@ type App struct {
 	AutoStart       bool
 	ExposedPort     int
 	HealthEndpoint  string
-	PruneAfterStart bool // delete rootfs after app starts (frees disk on ephemeral storage)
+	PruneAfterStart bool // prune safe cache/doc/temp files after app starts
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	LastStarted     *time.Time

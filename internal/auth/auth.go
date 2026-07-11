@@ -30,13 +30,21 @@ func (m *Manager) CheckPassword(submitted string) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
-// CreateSession mints a random session token and stores it.
-func (m *Manager) CreateSession() (string, error) {
+// RandomToken returns a cryptographically-random session/CSRF token.
+func RandomToken() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	token := hex.EncodeToString(buf)
+	return hex.EncodeToString(buf), nil
+}
+
+// CreateSession mints a random session token and stores it.
+func (m *Manager) CreateSession() (string, error) {
+	token, err := RandomToken()
+	if err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	m.sessions[token] = time.Now().Add(sessionTTL)
 	m.mu.Unlock()

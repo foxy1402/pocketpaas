@@ -75,16 +75,15 @@
             <p class="form-hint" style="margin-left:23px">Only applies when the rootfs exists (i.e. image was pulled).</p>
           </div>
 
-          <!-- Prune after start -->
+          <!-- Prune caches after start -->
           <div class="form-group">
             <label class="form-check">
               <input type="checkbox" name="prune_after_start" {{if $app.PruneAfterStart}}checked{{end}}>
-              Delete rootfs after app starts <span class="tag" style="margin-left:4px">free-tier</span>
+              Prune caches after app starts <span class="tag" style="margin-left:4px">free-tier</span>
             </label>
             <p class="form-hint" style="margin-left:23px">
-              Deletes the extracted image filesystem 3 s after a successful start to reclaim disk space.
-              The running process is unaffected (Linux keeps loaded files). The app <strong>cannot be restarted</strong>
-              without re-pulling — enable only if storage is scarce.
+              Removes package caches, temporary files, docs, man pages, locale files, and build junk
+              3 s after a successful start while keeping runtime files available for restarts.
             </p>
           </div>
 

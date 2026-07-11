@@ -43,9 +43,9 @@ type Manager struct {
 	procs   map[string]*Process           // appID -> active process
 	logs    map[string]*LogBuffer         // appID -> log buffer (persists across restarts)
 	health  map[string]HealthState        // appID -> last health check result
-	pulls   map[string]chan string         // appID -> pull-progress channel
-	pingers map[string]context.CancelFunc  // appID -> cancel func for health pinger
-	deploy  *DeployState                   // non-nil when deploy is active or recently done
+	pulls   map[string]chan string        // appID -> pull-progress channel
+	pingers map[string]context.CancelFunc // appID -> cancel func for health pinger
+	deploy  *DeployState                  // non-nil when deploy is active or recently done
 	store   *store.AppStore
 	dataDir string
 }
@@ -129,6 +129,9 @@ func (m *Manager) Start(appID string) error {
 	if app.Status == store.StatusPulling {
 		return fmt.Errorf("image pull in progress")
 	}
+	if app.RootfsPath == "" {
+		return fmt.Errorf("image rootfs missing; pull the image before starting")
+	}
 
 	if m.logs[appID] == nil {
 		m.logs[appID] = newLogBuffer()
@@ -163,9 +166,8 @@ func (m *Manager) Start(appID string) error {
 		}
 	}()
 
-	// Prune rootfs after a short delay if requested.
-	// On Linux a running process keeps its loaded files open even after the
-	// directory is deleted — the disk space is freed immediately.
+	// Prune safe cache/doc/temp directories after a short delay if requested.
+	// Runtime files stay in place so the app can keep running and restart later.
 	if app.PruneAfterStart && app.RootfsPath != "" {
 		rootfs := app.RootfsPath
 		go func() {
@@ -178,8 +180,7 @@ func (m *Manager) Start(appID string) error {
 				log.Printf("prune rootfs %s: %v", appID, err)
 				return
 			}
-			log.Printf("pruned rootfs for app %s (%s, kept /etc for DNS)", appID, rootfs)
-			_ = m.store.UpdateRootfsPath(appID, "")
+			log.Printf("pruned caches for app %s (%s, kept runtime files and DNS)", appID, rootfs)
 		}()
 	}
 
@@ -214,6 +215,13 @@ func (m *Manager) Restart(appID string) error {
 	m.mu.Unlock()
 
 	if running {
+		app, err := m.store.Get(appID)
+		if err != nil || app == nil {
+			return fmt.Errorf("app not found")
+		}
+		if app.RootfsPath == "" {
+			return fmt.Errorf("image rootfs missing; pull the image before restarting")
+		}
 		if err := m.Stop(appID); err != nil {
 			return err
 		}
@@ -283,18 +291,21 @@ func (m *Manager) RemoveApp(appID string) {
 // StartHealthPinger begins a background goroutine that pings the app's health
 // endpoint every 15 s. Any existing pinger for the same app is cancelled first.
 func (m *Manager) StartHealthPinger(app *store.App) {
-	if app.HealthEndpoint == "" || app.ExposedPort == 0 {
-		return
-	}
-	url := fmt.Sprintf("http://localhost:%d%s", app.ExposedPort, app.HealthEndpoint)
-
 	m.mu.Lock()
 	if cancel, ok := m.pingers[app.ID]; ok {
 		cancel() // stop old pinger
+		delete(m.pingers, app.ID)
+	}
+	delete(m.health, app.ID)
+	if app.HealthEndpoint == "" || app.ExposedPort == 0 {
+		m.mu.Unlock()
+		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.pingers[app.ID] = cancel
 	m.mu.Unlock()
+
+	url := fmt.Sprintf("http://localhost:%d%s", app.ExposedPort, app.HealthEndpoint)
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)

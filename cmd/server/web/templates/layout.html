@@ -56,6 +56,50 @@ function showToast(msg, type) {
   }, 3500);
 }
 
+function getCookieValue(name) {
+  return document.cookie
+    .split(';')
+    .map(function(c) { return c.trim(); })
+    .filter(function(c) { return c.indexOf(name + '=') === 0; })
+    .map(function(c) { return decodeURIComponent(c.slice(name.length + 1)); })[0] || '';
+}
+
+function csrfToken() {
+  return getCookieValue('apphive_csrf');
+}
+
+function attachCSRF(form) {
+  var method = (form.getAttribute('method') || 'GET').toUpperCase();
+  if (method === 'GET') return;
+  var token = csrfToken();
+  if (!token) return;
+  var input = form.querySelector('input[name="_csrf"]');
+  if (!input) {
+    input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = '_csrf';
+    form.appendChild(input);
+  }
+  input.value = token;
+}
+
+document.addEventListener('submit', function(e) {
+  if (e.target && e.target.tagName === 'FORM') {
+    attachCSRF(e.target);
+  }
+}, true);
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('form').forEach(attachCSRF);
+});
+
+document.addEventListener('htmx:configRequest', function(e) {
+  var token = csrfToken();
+  if (token) {
+    e.detail.headers['X-CSRF-Token'] = token;
+  }
+});
+
 // Show toast on HTMX success/error
 document.addEventListener('htmx:afterRequest', function(e) {
   if (e.detail.failed && e.detail.xhr) {

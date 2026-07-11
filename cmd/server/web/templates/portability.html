@@ -65,9 +65,8 @@
       <div class="card-body">
         <p style="font-size:13px; color:var(--muted); margin-bottom:14px">
           Designed for <strong>ephemeral storage</strong> (e.g. free-tier PaaS with limited disk).
-          Imports configs, then for each app in order: pulls the image → starts the app → <em>immediately prunes</em>
-          the rootfs from disk before moving to the next app. This prevents OOM crashes caused by
-          holding multiple image filesystems on disk at once.
+          Imports configs, then for each app in order: pulls the image → starts the app → <em>prunes safe caches/docs</em>
+          before moving to the next app. This reduces disk usage while keeping runtime files available for restarts.
         </p>
 
         <form method="POST" action="/portability/sequential-deploy" enctype="multipart/form-data">

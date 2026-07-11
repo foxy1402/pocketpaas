@@ -294,13 +294,12 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			}
 		}
 
-		// ── Prune ── (always prune to free ephemeral storage for next app)
-		dlog.Write("│  Pruning rootfs…")
+		// ── Prune ── (remove safe caches/docs while keeping runtime files available)
+		dlog.Write("│  Pruning caches…")
 		if err := runtime.PruneRootfsKeepDNS(destDir); err != nil {
 			dlog.Write("│  ✗ Prune error: " + err.Error())
 		} else {
-			_ = srv.store.UpdateRootfsPath(app.ID, "")
-			dlog.Write("│  Disk freed ✓")
+			dlog.Write("│  Cache/docs pruned ✓")
 		}
 
 		dlog.Write("└─ Done")

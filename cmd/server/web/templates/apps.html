@@ -59,7 +59,7 @@
           <td>
             <a href="/apps/{{.ID}}" class="app-name">{{.Name}}</a>
             {{if .AutoStart}}<span class="tag" title="Auto-starts on dashboard boot">auto</span>{{end}}
-            {{if and .PruneAfterStart (not .RootfsPath) (not (eq .Status "running"))}}<span class="tag" style="color:var(--yellow);border-color:var(--yellow)" title="Rootfs deleted — re-pull before starting">needs pull</span>{{end}}
+            {{if and .PruneAfterStart (not .RootfsPath) (not (eq .Status "running"))}}<span class="tag" style="color:var(--yellow);border-color:var(--yellow)" title="Rootfs missing — pull before starting">needs pull</span>{{end}}
           </td>
           <td><span class="app-image" title="{{.ImageRef}}">{{.ImageRef}}</span></td>
           <td>
@@ -95,7 +95,7 @@
               <button
                 class="btn btn-ghost btn-xs"
                 style="color:var(--red)"
-                onclick="if(confirm('Delete {{.Name}}?')) htmx.ajax('DELETE','/apps/{{.ID}}',{target:'body'})"
+                onclick="if(confirm('Delete {{.Name}}?')) htmx.ajax('DELETE','/apps/{{.ID}}',{target:'body',headers:{'X-CSRF-Token':csrfToken()}})"
                 title="Delete"
               >✕</button>
             </div>

@@ -35,7 +35,14 @@ func (srv *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
-	auth.SetCookie(w, token)
+	csrf, err := auth.RandomToken()
+	if err != nil {
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+	secure := isSecureRequest(r)
+	auth.SetCookie(w, token, secure)
+	auth.SetCSRFCookie(w, csrf, secure)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -43,7 +50,7 @@ func (srv *Server) getLogout(w http.ResponseWriter, r *http.Request) {
 	if token := auth.TokenFromRequest(r); token != "" {
 		srv.auth.DeleteSession(token)
 	}
-	auth.ClearCookie(w)
+	auth.ClearCookies(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -83,6 +90,7 @@ func (srv *Server) postCreateApp(w http.ResponseWriter, r *http.Request) {
 		srv.serverError(w, err)
 		return
 	}
+	srv.manager.StartHealthPinger(app)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -108,6 +116,7 @@ func (srv *Server) postUpdateApp(w http.ResponseWriter, r *http.Request) {
 		srv.serverError(w, err)
 		return
 	}
+	srv.manager.StartHealthPinger(app)
 	http.Redirect(w, r, fmt.Sprintf("/apps/%s", app.ID), http.StatusSeeOther)
 }
 
@@ -413,15 +422,15 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 	app.ImageRef = strings.TrimSpace(r.FormValue("image_ref"))
 	app.HealthEndpoint = strings.TrimSpace(r.FormValue("health_endpoint"))
 
-	// Entrypoint/command: preserve existing when field is blank (user didn't clear it)
-	// but allow explicit clearing by submitting a space character.
-	if ep := strings.TrimSpace(r.FormValue("entrypoint")); ep != "" {
-		app.Entrypoint = strings.Fields(ep)
+	// Entrypoint/command: if the form submitted the field, use it exactly
+	// (blank means clear). If an API client omits the field on update, preserve it.
+	if _, ok := r.Form["entrypoint"]; ok {
+		app.Entrypoint = strings.Fields(strings.TrimSpace(r.FormValue("entrypoint")))
 	} else if existing != nil {
 		app.Entrypoint = existing.Entrypoint
 	}
-	if cmd := strings.TrimSpace(r.FormValue("command")); cmd != "" {
-		app.Command = strings.Fields(cmd)
+	if _, ok := r.Form["command"]; ok {
+		app.Command = strings.Fields(strings.TrimSpace(r.FormValue("command")))
 	} else if existing != nil {
 		app.Command = existing.Command
 	}
@@ -461,3 +470,6 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 	return app, errs
 }
 
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
