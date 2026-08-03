@@ -157,18 +157,31 @@ func (srv *Server) getDeployStream(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
+	// Keepalive as a named "ping" event (carries data) so the client can
+	// observe it and reset its dead-connection watchdog. A bare ": ping"
+	// comment would be invisible to JS.
+	ping := time.NewTicker(20 * time.Second)
+	defer ping.Stop()
+
 	for {
 		select {
 		case line, ok := <-sub:
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", escapeLine(line))
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", escapeLine(line)); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ds.Done:
 			fmt.Fprintf(w, "event: done\ndata: done\n\n")
 			flusher.Flush()
 			return
+		case <-ping.C:
+			if _, err := fmt.Fprintf(w, "event: ping\ndata: {}\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
@@ -233,7 +246,7 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			_ = srv.store.UpdateStatus(app.ID, store.StatusError)
 			continue
 		}
-		if err := registry.Extract(img, destDir, pullCh); err != nil {
+		if err := registry.Extract(pullCtx, img, destDir, pullCh); err != nil {
 			pullCancel()
 			close(pullCh)
 			<-pullRelayed

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -208,20 +209,10 @@ func (m *Manager) Stop(appID string) error {
 	return nil
 }
 
-// Restart stops then starts the app.
+// Restart stops then starts the app. Start() re-reads the app from the store
+// so the new process always picks up the latest config.
 func (m *Manager) Restart(appID string) error {
-	m.mu.Lock()
-	_, running := m.procs[appID]
-	m.mu.Unlock()
-
-	if running {
-		app, err := m.store.Get(appID)
-		if err != nil || app == nil {
-			return fmt.Errorf("app not found")
-		}
-		if app.RootfsPath == "" {
-			return fmt.Errorf("image rootfs missing; pull the image before restarting")
-		}
+	if m.IsRunning(appID) {
 		if err := m.Stop(appID); err != nil {
 			return err
 		}
@@ -249,11 +240,23 @@ func (m *Manager) PID(appID string) int {
 
 // OpenPullChannel creates a progress channel for a pull operation.
 func (m *Manager) OpenPullChannel(appID string) chan string {
-	ch := make(chan string, 64)
-	m.mu.Lock()
-	m.pulls[appID] = ch
-	m.mu.Unlock()
+	ch, _ := m.TryAcquirePull(appID)
 	return ch
+}
+
+// TryAcquirePull atomically checks whether a pull is already in progress for
+// the app and, if not, creates and registers its progress channel. This
+// closes the check-then-open race that allowed two concurrent requests to
+// pull the same image into the same rootfs directory.
+func (m *Manager) TryAcquirePull(appID string) (chan string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, busy := m.pulls[appID]; busy {
+		return nil, false
+	}
+	ch := make(chan string, 64)
+	m.pulls[appID] = ch
+	return ch, true
 }
 
 // PullChannel returns the active pull progress channel, or nil.
@@ -297,7 +300,7 @@ func (m *Manager) StartHealthPinger(app *store.App) {
 		delete(m.pingers, app.ID)
 	}
 	delete(m.health, app.ID)
-	if app.HealthEndpoint == "" || app.ExposedPort == 0 {
+	if app.HealthEndpoint == "" || app.ExposedPort == 0 || !validHealthPath(app.HealthEndpoint) {
 		m.mu.Unlock()
 		return
 	}
@@ -318,11 +321,10 @@ func (m *Manager) StartHealthPinger(app *store.App) {
 			case <-ticker.C:
 				state := HealthFailing
 				if m.IsRunning(app.ID) {
-					resp, err := client.Get(url)
-					if err == nil && resp.StatusCode < 400 {
-						state = HealthOK
-					}
-					if resp != nil {
+					if resp, err := client.Get(url); err == nil {
+						if resp.StatusCode < 400 {
+							state = HealthOK
+						}
 						resp.Body.Close()
 					}
 				}
@@ -339,4 +341,24 @@ func (m *Manager) HealthStatus(appID string) HealthState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.health[appID]
+}
+
+// StopAll terminates every running app process. Called during graceful
+// shutdown so no app subprocesses are orphaned.
+func (m *Manager) StopAll() {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.procs))
+	for id := range m.procs {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		_ = m.Stop(id)
+	}
+}
+
+// validHealthPath reports whether s is a safe local path (e.g. "/health")
+// rather than an absolute URL that would leak requests to an external server.
+func validHealthPath(s string) bool {
+	return strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "//") && !strings.Contains(s, "://")
 }

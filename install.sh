@@ -24,7 +24,8 @@ port_in_use() {
   p="$1"
   hex="$(printf '%04X' "$p")"
   # /proc/net/tcp and /proc/net/tcp6 list every bound socket (port in uppercase hex).
-  grep -qsE ":${hex} " /proc/net/tcp /proc/net/tcp6 2>/dev/null && return 0
+  # \b word-boundary handles both mid-line and end-of-line socket entries.
+  grep -qsEi ":${hex}\b" /proc/net/tcp /proc/net/tcp6 2>/dev/null && return 0
   # Fallback: ss (iproute2, available on most distros)
   if command -v ss >/dev/null 2>&1; then
     ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":${p}$" && return 0
@@ -214,6 +215,7 @@ else
   if ! command -v go >/dev/null 2>&1; then
     GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 || echo go1.23.4)"
     printf '==> Installing %s...\n' "$GO_VERSION"
+    # Target environment is always a Linux container — hardcode linux here.
     curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C "$HOME" -xz
     export PATH="$HOME/go/bin:$PATH"
     printf 'export PATH="$HOME/go/bin:$PATH"\n' >> "$HOME/.profile" 2>/dev/null || true

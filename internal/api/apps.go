@@ -20,6 +20,10 @@ import (
 
 // ---- Auth ----
 
+// failedLoginDelay is the fixed delay before processing another login attempt,
+// slowing online brute-force guessing to a practical crawl.
+const failedLoginDelay = 500 * time.Millisecond
+
 func (srv *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 	srv.render(w, "login.html", map[string]any{"Error": ""})
 }
@@ -27,6 +31,7 @@ func (srv *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	if !srv.auth.CheckPassword(password) {
+		time.Sleep(failedLoginDelay)
 		srv.render(w, "login.html", map[string]any{"Error": "Invalid password."})
 		return
 	}
@@ -180,7 +185,7 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 		return
 	}
 
-	if err := registry.Extract(img, destDir, ch); err != nil {
+	if err := registry.Extract(ctx, img, destDir, ch); err != nil {
 		ch <- "ERROR: " + err.Error()
 		_ = srv.store.UpdateStatus(appID, store.StatusError)
 		return
@@ -228,7 +233,9 @@ func (srv *Server) postPullApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stop the app before pulling a new image", http.StatusConflict)
 		return
 	}
-	if srv.manager.PullChannel(app.ID) != nil {
+	// Atomically acquire the pull slot — races the check against another request.
+	ch, ok := srv.manager.TryAcquirePull(app.ID)
+	if !ok {
 		http.Error(w, "pull already in progress", http.StatusConflict)
 		return
 	}
@@ -237,7 +244,6 @@ func (srv *Server) postPullApp(w http.ResponseWriter, r *http.Request) {
 	destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
 
 	go func() {
-		ch := srv.manager.OpenPullChannel(app.ID)
 		defer srv.manager.ClosePullChannel(app.ID)
 		srv.runPull(app.ID, app.ImageRef, destDir, app.Entrypoint, app.Command, app.WorkDir, app.ExposedPort, ch)
 	}()
@@ -318,16 +324,17 @@ func (srv *Server) postPullAll(w http.ResponseWriter, r *http.Request) {
 			app.Status != store.StatusCrashed {
 			continue
 		}
-		if srv.manager.PullChannel(app.ID) != nil {
+		// Atomically acquire the pull slot; skip apps already being pulled.
+		ch, ok := srv.manager.TryAcquirePull(app.ID)
+		if !ok {
 			continue
 		}
 		_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
 		destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
-		go func(a *store.App, dest string) {
-			ch := srv.manager.OpenPullChannel(a.ID)
+		go func(a *store.App, dest string, ch chan string) {
 			defer srv.manager.ClosePullChannel(a.ID)
 			srv.runPull(a.ID, a.ImageRef, dest, a.Entrypoint, a.Command, a.WorkDir, a.ExposedPort, ch)
-		}(app, destDir)
+		}(app, destDir, ch)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -409,6 +416,7 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 	}
 
 	app := &store.App{}
+	var errs []string
 	if existing != nil {
 		// Preserve fields that are set by the pull process, not by the user form.
 		app.ID = existing.ID
@@ -438,7 +446,13 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 	portStr := strings.TrimSpace(r.FormValue("exposed_port"))
 	if portStr != "" {
 		if p, err := strconv.Atoi(portStr); err == nil {
-			app.ExposedPort = p
+			if p < 1 || p > 65535 {
+				errs = append(errs, "Exposed port must be between 1 and 65535.")
+			} else {
+				app.ExposedPort = p
+			}
+		} else {
+			errs = append(errs, "Exposed port must be a number.")
 		}
 	}
 	app.AutoStart = r.FormValue("auto_start") == "on"
@@ -459,12 +473,14 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 		app.EnvVars = append(app.EnvVars, store.EnvVar{Key: k, Value: v})
 	}
 
-	var errs []string
 	if app.Name == "" {
 		errs = append(errs, "Name is required.")
 	}
 	if app.ImageRef == "" {
 		errs = append(errs, "Image reference is required.")
+	}
+	if app.HealthEndpoint != "" && !strings.HasPrefix(app.HealthEndpoint, "/") {
+		errs = append(errs, "Health check path must start with '/' (e.g. /health).")
 	}
 
 	return app, errs

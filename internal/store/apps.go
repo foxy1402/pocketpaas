@@ -24,6 +24,7 @@ func (s *AppStore) Create(app *App) error {
 	if err != nil {
 		return fmt.Errorf("marshal command: %w", err)
 	}
+	app.EnvVars = dedupEnvVars(app.EnvVars)
 	now := time.Now().UTC()
 	app.CreatedAt = now
 	app.UpdatedAt = now
@@ -65,6 +66,7 @@ func (s *AppStore) Update(app *App) error {
 	if err != nil {
 		return fmt.Errorf("marshal command: %w", err)
 	}
+	app.EnvVars = dedupEnvVars(app.EnvVars)
 	app.UpdatedAt = time.Now().UTC()
 
 	tx, err := s.db.Begin()
@@ -284,4 +286,20 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// dedupEnvVars drops duplicate keys, keeping the last occurrence (matching
+// the semantics of exec.Cmd.Env, where the last entry wins).
+func dedupEnvVars(vars []EnvVar) []EnvVar {
+	seen := make(map[string]int, len(vars))
+	out := vars[:0]
+	for _, ev := range vars {
+		if idx, dup := seen[ev.Key]; dup {
+			out[idx] = ev // overwrite earlier duplicate
+			continue
+		}
+		seen[ev.Key] = len(out)
+		out = append(out, ev)
+	}
+	return out
 }

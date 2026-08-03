@@ -62,6 +62,7 @@ func (srv *Server) getLogsSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func escapeLine(s string) string {
-	// SSE data fields must not contain raw newlines.
+	// SSE data fields must not contain raw newlines or carriage returns.
+	s = strings.ReplaceAll(s, "\r", "")
 	return strings.ReplaceAll(s, "\n", " ")
 }

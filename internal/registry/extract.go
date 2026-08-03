@@ -2,6 +2,7 @@ package registry
 
 import (
 	"archive/tar"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +13,9 @@ import (
 )
 
 // Extract writes the image's flattened filesystem to destDir.
-// It sends progress messages to the progress channel (non-blocking).
-func Extract(img v1.Image, destDir string, progress chan<- string) error {
+// It sends progress messages to the progress channel (non-blocking) and
+// aborts early when ctx is cancelled (e.g. the pull timeout fires).
+func Extract(ctx context.Context, img v1.Image, destDir string, progress chan<- string) error {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("create dest dir: %w", err)
 	}
@@ -26,13 +28,16 @@ func Extract(img v1.Image, destDir string, progress chan<- string) error {
 	cleanDest := filepath.Clean(destDir) + string(filepath.Separator)
 
 	for i, layer := range layers {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("extract cancelled: %w", err)
+		}
 		sendProgress(progress, fmt.Sprintf("Downloading layer %d/%d …", i+1, len(layers)))
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			return fmt.Errorf("uncompress layer %d: %w", i+1, err)
 		}
 		sendProgress(progress, fmt.Sprintf("Extracting layer %d/%d …", i+1, len(layers)))
-		if err := extractTar(rc, destDir, cleanDest); err != nil {
+		if err := extractTar(ctx, rc, destDir, cleanDest); err != nil {
 			rc.Close()
 			return fmt.Errorf("extract layer %d: %w", i+1, err)
 		}
@@ -43,9 +48,12 @@ func Extract(img v1.Image, destDir string, progress chan<- string) error {
 	return nil
 }
 
-func extractTar(r io.Reader, destDir, cleanDest string) error {
+func extractTar(ctx context.Context, r io.Reader, destDir, cleanDest string) error {
 	tr := tar.NewReader(r)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -97,7 +105,7 @@ func extractTar(r io.Reader, destDir, cleanDest string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(f, tr); err != nil {
+			if err := copyWithCtx(ctx, f, tr); err != nil {
 				f.Close()
 				return err
 			}
@@ -116,6 +124,9 @@ func extractTar(r io.Reader, destDir, cleanDest string) error {
 				_ = err
 			}
 		case tar.TypeLink:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Hard links must be within destDir.
 			link := filepath.Join(destDir, filepath.Clean(strings.TrimPrefix(
 				filepath.ToSlash(hdr.Linkname), "/")))
@@ -128,4 +139,26 @@ func extractTar(r io.Reader, destDir, cleanDest string) error {
 		}
 	}
 	return nil
+}
+
+// copyWithCtx copies src to dst in chunks, aborting when ctx is cancelled.
+func copyWithCtx(ctx context.Context, dst io.Writer, src io.Reader) error {
+	buf := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return werr
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
 }

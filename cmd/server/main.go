@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"apphive/internal/api"
@@ -109,8 +111,23 @@ func main() {
 	if rev == "" {
 		rev = "dev"
 	}
+
+	// Graceful shutdown: stop app subprocesses and the HTTP server on SIGTERM/SIGINT
+	// so containers receive a clean exit instead of orphaned processes.
+	srvHTTP := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		<-sig
+		log.Println("shutting down — stopping apps…")
+		mgr.StopAll()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srvHTTP.Shutdown(ctx)
+	}()
+
 	log.Printf("pocketpaas %s (built %s) listening on %s (data: %s)", rev, buildTime, addr, dataDir)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srvHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}
 }

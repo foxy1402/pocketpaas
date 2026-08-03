@@ -428,7 +428,8 @@ func PruneRootfsKeepDNS(rootfsPath string) error {
 		"usr/share/info",
 		"usr/share/locale",
 		"root/.cache",
-		"home",
+		// Note: "home" is intentionally NOT pruned — some images keep application
+		// data or user configs there that are needed across restarts.
 	}
 	for _, rel := range safeToRemove {
 		_ = os.RemoveAll(filepath.Join(rootfsPath, rel))

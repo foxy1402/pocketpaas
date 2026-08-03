@@ -49,28 +49,50 @@
   if (!dl) return;
   const src = new EventSource('/portability/deploy-stream');
 
+  var doneFired = false;
+  function markDone(final) {
+    if (doneFired) return;   // idempotent — watchdog and 'done' event can both fire
+    doneFired = true;
+    src.close();
+    const badge = document.getElementById('deploy-status-badge');
+    const dot   = document.getElementById('live-dot');
+    const banner = document.getElementById('deploy-done-banner');
+    if (dot) dot.style.display = 'none';
+    if (final) {
+      // Server confirmed completion via the 'done' event.
+      if (badge)  { badge.textContent = 'done'; badge.className = 'badge badge-stopped'; }
+      if (banner) banner.style.display = '';
+    } else {
+      // Watchdog tripped — connection died without a completion signal.
+      if (badge)  { badge.textContent = 'connection lost'; badge.className = 'badge badge-error'; }
+      showToast('Lost connection to deploy stream — check the dashboard for final state.', 'error');
+    }
+  }
+
+  var lastEvent = Date.now();
+  src.addEventListener('done', function() { lastEvent = Date.now(); markDone(true); });
+
   src.onmessage = function(e) {
+    lastEvent = Date.now();
     const line = document.createElement('span');
     line.className = 'log-line';
     line.textContent = e.data;
     dl.appendChild(line);
     window.scrollLog();
   };
+  // Server keepalive pings are real events (not comments) — they reset the
+  // watchdog, so a long-but-healthy download never falsely trips it.
+  src.addEventListener('ping', function() { lastEvent = Date.now(); });
+  // EventSource auto-reconnects on transient drops; the watchdog below only
+  // fires if even those keepalives stop arriving.
 
-  function markDone() {
-    src.close();
-    const badge = document.getElementById('deploy-status-badge');
-    const dot   = document.getElementById('live-dot');
-    const banner = document.getElementById('deploy-done-banner');
-    if (badge)  { badge.textContent = 'done'; badge.className = 'badge badge-stopped'; }
-    if (dot)    dot.style.display = 'none';
-    if (banner) banner.style.display = '';
-  }
-
-  src.addEventListener('done', markDone);
-  src.onerror = function() {
-    if (src.readyState === EventSource.CLOSED) markDone();
-  };
+  // Watchdog: if no data arrives for 90 s (over 4 missed server pings) the
+  // connection is silently dead.
+  setInterval(function() {
+    if (!doneFired && Date.now() - lastEvent > 90000) {
+      markDone(false);
+    }
+  }, 10000);
 })();
 </script>
 {{end}}

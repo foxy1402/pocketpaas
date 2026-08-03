@@ -26,6 +26,9 @@ RUN CGO_ENABLED=0 \
     ./cmd/server
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
+# NOTE: runs as root intentionally — chroot(2) for app isolation requires
+# CAP_SYS_CHROOT which is root-only. When chroot is unavailable the runtime
+# falls back to rootfs-prefix mode automatically.
 FROM alpine:3.20
 
 # ca-certificates: for HTTPS image pulls from registries.
