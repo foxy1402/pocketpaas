@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"embed"
 	"html/template"
 	"io/fs"
@@ -18,15 +19,16 @@ import (
 
 // Server holds all shared dependencies for the HTTP handlers.
 type Server struct {
-	store    *store.AppStore
-	manager  *runtime.Manager
-	auth     *auth.Manager
-	pages    map[string]*template.Template
-	dataDir  string
-	regCreds *registry.Credentials
-	sampler  *sysinfo.Sampler
-	tunnel   *tunnel.Manager
-	innerMux *http.ServeMux // protected routes — built once at startup
+	store       *store.AppStore
+	manager     *runtime.Manager
+	auth        *auth.Manager
+	pages       map[string]*template.Template
+	dataDir     string
+	regCreds    *registry.Credentials
+	sampler     *sysinfo.Sampler
+	tunnel      *tunnel.Manager
+	innerMux    *http.ServeMux  // protected routes — built once at startup
+	shutdownCtx context.Context // cancelled at shutdown; pulls/deploys abort on it
 }
 
 // NewServer constructs the Server from its dependencies.
@@ -39,6 +41,7 @@ func NewServer(
 	regCreds *registry.Credentials,
 	sampler *sysinfo.Sampler,
 	tunMgr *tunnel.Manager,
+	shutdownCtx context.Context,
 ) *Server {
 	funcs := template.FuncMap{
 		"statusClass": statusClass,
@@ -65,15 +68,19 @@ func NewServer(
 		template.New("login.html").Funcs(funcs).ParseFS(tmplFS, "web/templates/login.html"),
 	)
 
+	if shutdownCtx == nil {
+		shutdownCtx = context.Background()
+	}
 	srv := &Server{
-		store:    s,
-		manager:  m,
-		auth:     a,
-		pages:    pages,
-		dataDir:  dataDir,
-		regCreds: regCreds,
-		sampler:  sampler,
-		tunnel:   tunMgr,
+		store:       s,
+		manager:     m,
+		auth:        a,
+		pages:       pages,
+		dataDir:     dataDir,
+		regCreds:    regCreds,
+		sampler:     sampler,
+		tunnel:      tunMgr,
+		shutdownCtx: shutdownCtx,
 	}
 	srv.innerMux = srv.buildProtectedMux()
 	return srv
@@ -125,10 +132,25 @@ func (srv *Server) RegisterRoutes(mux *http.ServeMux, staticFS embed.FS) {
 	// Public routes.
 	mux.HandleFunc("GET /login", srv.getLogin)
 	mux.HandleFunc("POST /login", srv.postLogin)
-	mux.HandleFunc("GET /logout", srv.getLogout)
+	// POST-only: a state-changing GET (plain <img src=...>) would force-logout
+	// the admin cross-site.
+	mux.HandleFunc("POST /logout", srv.postLogout)
 
 	// Protected routes wrapped with auth middleware.
 	mux.Handle("/", srv.auth.Middleware(srv.innerMux))
+}
+
+// SecurityHeaders sets baseline browser-security headers on every response.
+// Wrap the top-level mux with it (main.go) so it also covers static files
+// and the login page, on both the local listener and the ngrok tunnel.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Template helpers.

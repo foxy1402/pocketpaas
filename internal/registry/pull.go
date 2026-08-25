@@ -31,19 +31,23 @@ func Pull(ctx context.Context, imageRef string, creds *Credentials, progress cha
 		return nil, fmt.Errorf("parse image ref %q: %w", imageRef, err)
 	}
 
+	// Compose a keychain: explicitly configured credentials are offered ONLY
+	// for this pull's registry (never leaked to a third-party token server),
+	// and the ambient keychain (docker config, cloud credential helpers)
+	// remains available for everything else.
+	keychain := authn.Keychain(authn.DefaultKeychain)
+	if creds != nil && creds.Username != "" {
+		keychain = authn.NewMultiKeychain(
+			&staticKeychain{
+				cfg:  authn.AuthConfig{Username: creds.Username, Password: creds.Password},
+				host: ref.Context().RegistryStr(),
+			},
+			authn.DefaultKeychain,
+		)
+	}
 	opts := []remote.Option{
 		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
-	}
-	if creds != nil && creds.Username != "" {
-		auth := authn.FromConfig(authn.AuthConfig{
-			Username: creds.Username,
-			Password: creds.Password,
-		})
-		opts = []remote.Option{
-			remote.WithContext(ctx),
-			remote.WithAuth(auth),
-		}
+		remote.WithAuthFromKeychain(keychain),
 	}
 
 	sendProgress(progress, "Fetching image manifest …")
@@ -106,4 +110,19 @@ func sendProgress(ch chan<- string, msg string) {
 	case ch <- msg:
 	default:
 	}
+}
+
+// staticKeychain serves fixed credentials, but only to the registry host they
+// were configured for — other hosts get Anonymous so the credentials are
+// never transmitted to an unrelated registry's token endpoint.
+type staticKeychain struct {
+	cfg  authn.AuthConfig
+	host string
+}
+
+func (k *staticKeychain) Resolve(r authn.Resource) (authn.Authenticator, error) {
+	if r.RegistryStr() == k.host {
+		return authn.FromConfig(k.cfg), nil
+	}
+	return authn.Anonymous, nil
 }

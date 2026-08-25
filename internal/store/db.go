@@ -4,13 +4,18 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
 
 // Open opens (or creates) the SQLite database at path and runs migrations.
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_foreign_keys=on&_journal_mode=WAL")
+	// modernc.org/sqlite only honors the _pragma=NAME(VALUE) query parameter
+	// form — mattn-style _foreign_keys/_journal_mode parameters are silently
+	// ignored, which previously left foreign_keys OFF (breaking ON DELETE
+	// CASCADE) and never enabled WAL.
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -56,7 +61,15 @@ func migrate(db *sql.DB) error {
 	}
 
 	// Idempotent additions for databases that predate these columns.
-	db.Exec(`ALTER TABLE apps ADD COLUMN prune_after_start INTEGER NOT NULL DEFAULT 0`)
-	db.Exec(`ALTER TABLE apps ADD COLUMN rootfs_path TEXT NOT NULL DEFAULT ''`)
+	// Only "duplicate column" errors are tolerated — anything else (I/O errors,
+	// corruption) must surface instead of being silently swallowed.
+	for _, stmt := range []string{
+		`ALTER TABLE apps ADD COLUMN prune_after_start INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE apps ADD COLUMN rootfs_path TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migration %q: %w", stmt, err)
+		}
+	}
 	return nil
 }

@@ -11,9 +11,12 @@ const exportVersion = 1
 
 // ExportFile is the top-level JSON structure for export/import.
 type ExportFile struct {
-	Version    int          `json:"version"`
-	ExportedAt time.Time    `json:"exported_at"`
-	Apps       []ExportedApp `json:"apps"`
+	Version    int       `json:"version"`
+	ExportedAt time.Time `json:"exported_at"`
+	// Warning reminds whoever handles the file that env vars (often secrets)
+	// are included in plaintext. Ignored by older importers.
+	Warning string        `json:"warning,omitempty"`
+	Apps    []ExportedApp `json:"apps"`
 }
 
 // ExportedApp holds all data needed to reconstruct an app record.
@@ -43,6 +46,7 @@ func Export(s *store.AppStore) ([]byte, error) {
 	ef := ExportFile{
 		Version:    exportVersion,
 		ExportedAt: time.Now().UTC(),
+		Warning:    "Contains plaintext environment variables (likely secrets) — store and share this file securely.",
 		Apps:       make([]ExportedApp, 0, len(apps)),
 	}
 

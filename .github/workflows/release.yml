@@ -13,9 +13,9 @@ jobs:
       contents: write   # needed to create the GitHub release
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -34,10 +34,16 @@ jobs:
             -o pocketpaas-linux-arm64 \
             ./cmd/server
 
+      - name: Generate checksums
+        # Filenames must exactly match the uploaded asset names — install.sh
+        # verifies downloads with `sha256sum -c --ignore-missing checksums.txt`.
+        run: sha256sum pocketpaas-linux-amd64 pocketpaas-linux-arm64 > checksums.txt
+
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             pocketpaas-linux-amd64
             pocketpaas-linux-arm64
+            checksums.txt
           generate_release_notes: true

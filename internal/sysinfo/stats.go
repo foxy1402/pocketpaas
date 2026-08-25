@@ -21,28 +21,32 @@ type Sampler struct {
 }
 
 // Update reads the OS stats and refreshes the cached Stats value.
+// On a transient read failure the previous sample is kept — overwriting prev
+// values with zeros would freeze the CPU metric at its last known value.
 func (s *Sampler) Update() {
-	total, idle, _ := readCPUStats()
+	total, idle, cpuErr := readCPUStats()
 	totalMB, usedMB, _ := readMemStats()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.prevTotal > 0 && total > s.prevTotal {
-		deltaTotal := total - s.prevTotal
-		deltaIdle := idle - s.prevIdle
-		if deltaTotal > 0 {
-			s.current.CPUPercent = float64(deltaTotal-deltaIdle) / float64(deltaTotal) * 100
-			if s.current.CPUPercent < 0 {
-				s.current.CPUPercent = 0
-			}
-			if s.current.CPUPercent > 100 {
-				s.current.CPUPercent = 100
+	if cpuErr == nil {
+		if s.prevTotal > 0 && total > s.prevTotal {
+			deltaTotal := total - s.prevTotal
+			deltaIdle := idle - s.prevIdle
+			if deltaTotal > 0 {
+				s.current.CPUPercent = float64(deltaTotal-deltaIdle) / float64(deltaTotal) * 100
+				if s.current.CPUPercent < 0 {
+					s.current.CPUPercent = 0
+				}
+				if s.current.CPUPercent > 100 {
+					s.current.CPUPercent = 100
+				}
 			}
 		}
+		s.prevTotal = total
+		s.prevIdle = idle
 	}
-	s.prevTotal = total
-	s.prevIdle = idle
 
 	if totalMB > 0 {
 		s.current.RAMTotalMB = totalMB

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -33,7 +34,62 @@ func readCPUStats() (total, idle uint64, err error) {
 	return total, idle, nil
 }
 
+// readMemStats reports memory usage from cgroup limits when running inside a
+// container (so the dashboard shows the CONTAINER's allocation, not the
+// host's), falling back to /proc/meminfo otherwise.
 func readMemStats() (totalMB, usedMB int64, err error) {
+	if total, used, ok := readCgroupMem(); ok {
+		return total, used, nil
+	}
+	return readProcMeminfo()
+}
+
+// readCgroupMem reads cgroup v2 (memory.max/memory.current) or v1
+// (memory.limit_in_bytes/memory.usage_in_bytes) limits.
+// Values near the addressable-space ceiling mean "no limit" and are ignored.
+func readCgroupMem() (totalMB, usedMB int64, ok bool) {
+	// cgroup v2
+	if total, used, ok2 := readInt64Pair(
+		"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"); ok2 {
+		return total, used, true
+	}
+	// cgroup v1
+	if total, used, ok2 := readInt64Pair(
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+		"/sys/fs/cgroup/memory/memory.usage_in_bytes"); ok2 {
+		return total, used, true
+	}
+	return 0, 0, false
+}
+
+func readInt64Pair(totalPath, usedPath string) (totalMB, usedMB int64, ok bool) {
+	total, err := readCgroupFileInt(totalPath)
+	if err != nil || total <= 0 || total >= 1<<50 { // ~10^15 B = effectively unlimited
+		return 0, 0, false
+	}
+	used, err := readCgroupFileInt(usedPath)
+	if err != nil || used < 0 {
+		return 0, 0, false
+	}
+	if used > total {
+		used = total
+	}
+	return total / (1024 * 1024), used / (1024 * 1024), true
+}
+
+func readCgroupFileInt(path string) (int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "max" {
+		return 0, fmt.Errorf("unlimited")
+	}
+	return strconv.ParseInt(s, 10, 64)
+}
+
+func readProcMeminfo() (totalMB, usedMB int64, err error) {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0, 0, err

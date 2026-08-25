@@ -31,8 +31,14 @@ func (srv *Server) getExport(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// maxImportBytes caps import-upload body size. Note: ParseMultipartForm's
+// argument is only the in-RAM threshold (the rest spills to temp files), so
+// it is NOT a size limit — MaxBytesReader provides the real cap.
+const maxImportBytes = portability.MaxExportBytes
+
 func (srv *Server) postImport(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		http.Error(w, "request too large", http.StatusBadRequest)
 		return
 	}
@@ -70,7 +76,8 @@ func (srv *Server) postImport(w http.ResponseWriter, r *http.Request) {
 // postSequentialDeploy parses an export file, imports app configs, then kicks
 // off a background goroutine that pulls → starts → prunes each app in order.
 func (srv *Server) postSequentialDeploy(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		http.Error(w, "request too large", http.StatusBadRequest)
 		return
 	}
@@ -220,6 +227,23 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		dlog.Write(fmt.Sprintf("│  Image: %s", app.ImageRef))
 
 		destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
+
+		// Acquire the pull slot + app op lock so a manual start/pull/delete on
+		// this app cannot interleave with our extract+start sequence.
+		_, release, ok := srv.manager.TryStartPull(app.ID)
+		if !ok {
+			dlog.Write("│  ✗ SKIP: another pull is already in progress for this app")
+			dlog.Write("└─ SKIPPED")
+			dlog.Write("")
+			continue
+		}
+		// Stop a running app before touching its rootfs — the staging swap
+		// renames the rootfs out from under a chrooted process otherwise.
+		// (We hold the app lock, so use StopLocked.)
+		if srv.manager.IsRunning(app.ID) {
+			dlog.Write("│  Stopping running app before re-pull…")
+			_ = srv.manager.StopLocked(app.ID)
+		}
 		_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
 
 		// ── Pull ──
@@ -233,23 +257,30 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			}
 		}()
 
-		// Context covers both manifest fetch AND layer downloads — cancel only after Extract.
-		pullCtx, pullCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		// Context covers both manifest fetch AND layer downloads — cancel only
+		// after Extract; also aborts cleanly on server shutdown.
+		pullCtx, pullCancel := context.WithTimeout(srv.shutdownCtx, 30*time.Minute)
 		img, err := registry.Pull(pullCtx, app.ImageRef, creds, pullCh)
 		if err != nil {
 			pullCancel()
 			close(pullCh)
 			<-pullRelayed
+			srv.manager.ClosePullChannel(app.ID)
+			release()
 			dlog.Write("│  ✗ Pull failed: " + err.Error())
 			dlog.Write("└─ FAILED")
 			dlog.Write("")
 			_ = srv.store.UpdateStatus(app.ID, store.StatusError)
 			continue
 		}
-		if err := registry.Extract(pullCtx, img, destDir, pullCh); err != nil {
+		// Extract into a staging dir and swap atomically, so a failed deploy
+		// never destroys the previous working rootfs.
+		if err := extractAndSwap(pullCtx, img, destDir, pullCh); err != nil {
 			pullCancel()
 			close(pullCh)
 			<-pullRelayed
+			srv.manager.ClosePullChannel(app.ID)
+			release()
 			dlog.Write("│  ✗ Extract failed: " + err.Error())
 			dlog.Write("└─ FAILED")
 			dlog.Write("")
@@ -259,6 +290,8 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		pullCancel()
 		close(pullCh)
 		<-pullRelayed
+		srv.manager.ClosePullChannel(app.ID)
+		release()
 
 		// Apply image config defaults only when the user has no overrides.
 		ep, cmd, workDir, port, cfgErr := registry.ImageConfig(img)
@@ -290,6 +323,16 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		_ = srv.store.UpdateRootfsPath(app.ID, destDir)
 		_ = srv.store.UpdateStatus(app.ID, store.StatusStopped)
 
+		// ── Prune ── BEFORE start: caches/docs/temp are removed while nothing
+		// is running, and /tmp is recreated empty (pruning a live app could
+		// delete its runtime temp files).
+		dlog.Write("│  Pruning caches…")
+		if err := runtime.PruneRootfsKeepDNS(destDir); err != nil {
+			dlog.Write("│  ✗ Prune error: " + err.Error())
+		} else {
+			dlog.Write("│  Cache/docs pruned ✓")
+		}
+
 		// ── Start ──
 		dlog.Write("│  Starting app…")
 		if srv.manager.IsRunning(app.ID) {
@@ -305,14 +348,6 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			} else {
 				dlog.Write("│  ⚠ Exited shortly after start — check app logs")
 			}
-		}
-
-		// ── Prune ── (remove safe caches/docs while keeping runtime files available)
-		dlog.Write("│  Pruning caches…")
-		if err := runtime.PruneRootfsKeepDNS(destDir); err != nil {
-			dlog.Write("│  ✗ Prune error: " + err.Error())
-		} else {
-			dlog.Write("│  Cache/docs pruned ✓")
 		}
 
 		dlog.Write("└─ Done")

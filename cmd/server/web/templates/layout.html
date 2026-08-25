@@ -7,7 +7,6 @@
   <title>{{block "title" .}}pocketpaas{{end}}</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
-  <script src="/static/htmx-sse.js" defer></script>
 </head>
 <body>
 
@@ -31,7 +30,9 @@
     {{$ngrokURL := ngrokURL}}{{if $ngrokURL}}
     <a href="{{$ngrokURL}}" target="_blank" rel="noopener" class="ngrok-badge" title="ngrok tunnel active — click to open public URL">🔗 ngrok</a>
     {{end}}
-    <a href="/logout" class="btn btn-ghost btn-sm">Logout</a>
+    <form method="POST" action="/logout" style="display:inline">
+      <button type="submit" class="btn btn-ghost btn-sm">Logout</button>
+    </form>
   </div>
 </nav>
 
@@ -144,20 +145,22 @@ function filterApps(q) {
   });
 }
 
-// Log viewer auto-scroll
+// Log viewer auto-scroll — always targets #log-viewer explicitly.
+// (querySelector('.log-viewer') would find the pull-progress box first
+// during an image pull, scrolling/clearing the wrong pane.)
 (function() {
   let autoScroll = true;
   window.setAutoScroll = function(v) { autoScroll = v; };
   window.scrollLog = function() {
     if (!autoScroll) return;
-    const lv = document.querySelector('.log-viewer');
+    const lv = document.getElementById('log-viewer');
     if (lv) lv.scrollTop = lv.scrollHeight;
   };
 })();
 
 // Clear log view (browser-side only, doesn't affect the ring buffer)
 function clearLogView() {
-  const lv = document.querySelector('.log-viewer');
+  const lv = document.getElementById('log-viewer');
   if (lv) lv.innerHTML = '';
 }
 

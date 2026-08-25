@@ -15,8 +15,14 @@ func setSysProcAttr(cmd *exec.Cmd, _ string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func killProcessGroup(pid int) {
+func terminateProcessGroup(pid int) {
 	if pid > 0 {
 		syscall.Kill(-pid, syscall.SIGTERM)
+	}
+}
+
+func killProcessGroupForce(pid int) {
+	if pid > 0 {
+		syscall.Kill(-pid, syscall.SIGKILL)
 	}
 }

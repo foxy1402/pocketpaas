@@ -1,6 +1,9 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
 # Always run on the host (builder) platform.
 # TARGETOS / TARGETARCH are injected by Buildx for the target platform.
+# NOTE: for release builds, pin base images by digest (e.g.
+# golang:1.25.7-alpine@sha256:... and alpine:3.20@sha256:...) so builds are
+# reproducible and immune to upstream tag mutation.
 FROM --platform=$BUILDPLATFORM golang:1.25.7-alpine AS builder
 
 ARG TARGETOS=linux
@@ -45,5 +48,9 @@ ENV DATA_DIR=/data
 ENV PORT=8080
 
 EXPOSE 8080
+
+# Liveness probe — hit the login page on PORT (app default: 8080, see cmd/server/main.go).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD wget -q --spider "http://127.0.0.1:${PORT:-8080}/login" || exit 1
 
 ENTRYPOINT ["./pocketpaas"]

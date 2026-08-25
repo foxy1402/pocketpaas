@@ -76,8 +76,15 @@ func main() {
 	// Bootstrap runtime manager.
 	mgr := runtime.NewManager(appStore, dataDir)
 
-	// Auth manager.
+	// Auth manager (+ background expiry sweep for abandoned sessions).
 	authMgr := auth.NewManager(password)
+
+	// bgCtx is cancelled during graceful shutdown: the ngrok tunnel,
+	// background pulls/deploys, and the session sweeper all stop on it.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	authMgr.StartSweeper(bgCtx)
 
 	// System resource sampler (CPU %, RAM MB) — updated every 5 s.
 	sampler := &sysinfo.Sampler{}
@@ -92,12 +99,13 @@ func main() {
 
 	// Build HTTP server.
 	mux := http.NewServeMux()
-	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler, tunMgr)
+	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler, tunMgr, bgCtx)
 	srv.RegisterRoutes(mux, webFS)
+	handler := api.SecurityHeaders(mux)
 
 	// Start ngrok tunnel (no-op when NGROK_AUTHTOKEN is not set).
 	if tunMgr != nil {
-		tunMgr.Start(context.Background(), mux, ngrokToken, ngrokDomain)
+		tunMgr.Start(bgCtx, handler, ngrokToken, ngrokDomain)
 	}
 
 	// Auto-start apps that have the flag set (only meaningful with persistent storage).
@@ -112,18 +120,33 @@ func main() {
 		rev = "dev"
 	}
 
-	// Graceful shutdown: stop app subprocesses and the HTTP server on SIGTERM/SIGINT
-	// so containers receive a clean exit instead of orphaned processes.
-	srvHTTP := &http.Server{Addr: addr, Handler: mux}
+	// Graceful shutdown on SIGTERM/SIGINT:
+	//   1. srvHTTP.Shutdown stops NEW requests first, so no handler can still
+	//      start/stop/delete apps while we tear the world down.
+	//   2. bgCancel aborts background pulls/deploys (they extract to a staging
+	//      dir, so they leave no half-written rootfs) and closes the tunnel.
+	//   3. StopAll stops app subprocesses last.
+	srvHTTP := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// Timeouts guard against Slowloris-style resource exhaustion.
+		// WriteTimeout stays 0: SSE log/pull/deploy streams are unbounded.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 		<-sig
-		log.Println("shutting down — stopping apps…")
-		mgr.StopAll()
+		log.Println("shutting down — draining HTTP, stopping apps…")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = srvHTTP.Shutdown(ctx)
+		if err := srvHTTP.Shutdown(ctx); err != nil {
+			log.Printf("warn: http shutdown: %v", err)
+		}
+		bgCancel()
+		mgr.StopAll()
 	}()
 
 	log.Printf("pocketpaas %s (built %s) listening on %s (data: %s)", rev, buildTime, addr, dataDir)

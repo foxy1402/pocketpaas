@@ -46,6 +46,12 @@ func (m *Manager) Start(ctx context.Context, handler http.Handler, authtoken, do
 			log.Printf("ngrok: create agent: %v", err)
 			return
 		}
+		// Disconnect the agent on shutdown so the tunnel tears down cleanly
+		// instead of lingering until process exit.
+		go func() {
+			<-ctx.Done()
+			agent.Disconnect()
+		}()
 
 		var opts []ngroklib.EndpointOption
 		if domain != "" {

@@ -46,6 +46,7 @@ type Manager struct {
 	health  map[string]HealthState        // appID -> last health check result
 	pulls   map[string]chan string        // appID -> pull-progress channel
 	pingers map[string]context.CancelFunc // appID -> cancel func for health pinger
+	opLocks map[string]*sync.Mutex        // appID -> serializes start/stop/pull/delete/deploy
 	deploy  *DeployState                  // non-nil when deploy is active or recently done
 	store   *store.AppStore
 	dataDir string
@@ -58,9 +59,44 @@ func NewManager(s *store.AppStore, dataDir string) *Manager {
 		health:  make(map[string]HealthState),
 		pulls:   make(map[string]chan string),
 		pingers: make(map[string]context.CancelFunc),
+		opLocks: make(map[string]*sync.Mutex),
 		store:   s,
 		dataDir: dataDir,
 	}
+}
+
+// errBusy is returned when a per-app operation lock is already held.
+var errBusy = fmt.Errorf("another operation is in progress for this app")
+
+// getOpLock returns (creating if necessary) the per-app operation lock.
+func (m *Manager) getOpLock(appID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.opLocks[appID]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.opLocks[appID] = l
+	}
+	return l
+}
+
+// TryLockApp acquires the per-app operation lock without blocking.
+// Returns (unlock, true) or (nil, false) if another operation holds it.
+func (m *Manager) TryLockApp(appID string) (func(), bool) {
+	l := m.getOpLock(appID)
+	if !l.TryLock() {
+		return nil, false
+	}
+	return l.Unlock, true
+}
+
+// LockApp acquires the per-app operation lock, blocking until available.
+// Used by long background operations (pulls/deploys) that must wait their
+// turn rather than fail.
+func (m *Manager) LockApp(appID string) func() {
+	l := m.getOpLock(appID)
+	l.Lock()
+	return l.Unlock
 }
 
 // StartDeploy marks the start of a sequential deploy and returns its state.
@@ -86,14 +122,16 @@ func (m *Manager) StartDeploy() *DeployState {
 // FinishDeploy signals the sequential deploy as complete.
 func (m *Manager) FinishDeploy() {
 	m.mu.Lock()
-	d := m.deploy
-	m.mu.Unlock()
-	if d != nil {
-		select {
-		case <-d.Done:
-		default:
-			close(d.Done)
-		}
+	defer m.mu.Unlock()
+	if m.deploy == nil {
+		return
+	}
+	// The check and the close both happen under m.mu, so double-close is
+	// impossible by construction.
+	select {
+	case <-m.deploy.Done:
+	default:
+		close(m.deploy.Done)
 	}
 }
 
@@ -115,13 +153,26 @@ func (m *Manager) LogBuffer(appID string) *LogBuffer {
 }
 
 // Start starts the app subprocess.
+// It holds the app's operation lock for the whole spawn so concurrent
+// stop/pull/delete operations on the same app cannot interleave, but never
+// holds the global manager lock across disk I/O or SQL queries.
 func (m *Manager) Start(appID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, ok := m.TryLockApp(appID)
+	if !ok {
+		return errBusy
+	}
+	defer unlock()
 
-	if _, ok := m.procs[appID]; ok {
+	m.mu.Lock()
+	if _, running := m.procs[appID]; running {
+		m.mu.Unlock()
 		return fmt.Errorf("app is already running")
 	}
+	if _, pulling := m.pulls[appID]; pulling {
+		m.mu.Unlock()
+		return fmt.Errorf("image pull in progress")
+	}
+	m.mu.Unlock()
 
 	app, err := m.store.Get(appID)
 	if err != nil || app == nil {
@@ -134,26 +185,41 @@ func (m *Manager) Start(appID string) error {
 		return fmt.Errorf("image rootfs missing; pull the image before starting")
 	}
 
-	if m.logs[appID] == nil {
-		m.logs[appID] = newLogBuffer()
+	buf := m.LogBuffer(appID)
+
+	// Prune safe cache/doc/temp directories BEFORE starting (never while the
+	// app runs): the app always sees a freshly recreated empty /tmp, and no
+	// runtime file can disappear out from under it mid-flight.
+	if app.PruneAfterStart && app.RootfsPath != "" {
+		if err := PruneRootfsKeepDNS(app.RootfsPath); err != nil {
+			log.Printf("prune rootfs %s: %v", appID, err)
+		} else {
+			log.Printf("pruned caches for app %s (%s, kept runtime files and DNS)", appID, app.RootfsPath)
+		}
 	}
 
-	proc, err := startProcess(app, m.logs[appID])
+	proc, err := startProcess(app, buf)
 	if err != nil {
 		_ = m.store.UpdateStatus(appID, store.StatusError)
 		return err
 	}
 
+	m.mu.Lock()
 	m.procs[appID] = proc
+	m.mu.Unlock()
 	_ = m.store.UpdateStatus(appID, store.StatusRunning)
 	_ = m.store.SetLastStarted(appID)
 
 	// Watch the process in a goroutine; update status when it exits.
 	go func() {
 		exitErr := proc.wait()
+		// Remove from the registry BEFORE closing done: Stop() returning must
+		// imply the slot is free so an immediate Start() can't see the stale
+		// entry (previously done closed first → spurious "already running").
 		m.mu.Lock()
 		delete(m.procs, appID)
 		m.mu.Unlock()
+		close(proc.done)
 
 		if proc.isStopping() {
 			// Intentional stop — don't overwrite the status set by Stop().
@@ -167,29 +233,24 @@ func (m *Manager) Start(appID string) error {
 		}
 	}()
 
-	// Prune safe cache/doc/temp directories after a short delay if requested.
-	// Runtime files stay in place so the app can keep running and restart later.
-	if app.PruneAfterStart && app.RootfsPath != "" {
-		rootfs := app.RootfsPath
-		go func() {
-			time.Sleep(3 * time.Second)
-			if !m.IsRunning(appID) {
-				// Crashed immediately — keep rootfs for debugging.
-				return
-			}
-			if err := PruneRootfsKeepDNS(rootfs); err != nil {
-				log.Printf("prune rootfs %s: %v", appID, err)
-				return
-			}
-			log.Printf("pruned caches for app %s (%s, kept runtime files and DNS)", appID, rootfs)
-		}()
-	}
-
 	return nil
 }
 
-// Stop stops the app subprocess, waits up to 10 s, then force-kills via context.
+// Stop stops the app subprocess (SIGTERM → grace → SIGKILL) and only marks it
+// stopped after the process has actually exited and been removed from the
+// process registry.
 func (m *Manager) Stop(appID string) error {
+	unlock, ok := m.TryLockApp(appID)
+	if !ok {
+		return errBusy
+	}
+	defer unlock()
+	return m.StopLocked(appID)
+}
+
+// StopLocked is Stop for callers that already hold the app's operation lock
+// (e.g. deleteApp, sequential deploy).
+func (m *Manager) StopLocked(appID string) error {
 	m.mu.Lock()
 	proc, ok := m.procs[appID]
 	m.mu.Unlock()
@@ -198,12 +259,11 @@ func (m *Manager) Stop(appID string) error {
 		return fmt.Errorf("app is not running")
 	}
 
-	proc.stop()
+	proc.stop() // blocks through the grace period and SIGKILL escalation
 
-	select {
-	case <-proc.done:
-	case <-time.After(10 * time.Second):
-	}
+	// The watcher closes done only after removing the process from the
+	// registry, so once Stop returns the app can be started again cleanly.
+	<-proc.done
 
 	_ = m.store.UpdateStatus(appID, store.StatusStopped)
 	return nil
@@ -238,25 +298,24 @@ func (m *Manager) PID(appID string) int {
 	return 0
 }
 
-// OpenPullChannel creates a progress channel for a pull operation.
-func (m *Manager) OpenPullChannel(appID string) chan string {
-	ch, _ := m.TryAcquirePull(appID)
-	return ch
-}
-
-// TryAcquirePull atomically checks whether a pull is already in progress for
-// the app and, if not, creates and registers its progress channel. This
-// closes the check-then-open race that allowed two concurrent requests to
-// pull the same image into the same rootfs directory.
-func (m *Manager) TryAcquirePull(appID string) (chan string, bool) {
+// TryStartPull atomically checks whether a pull is already in progress for
+// the app and, if not, registers its progress channel. It also acquires the
+// per-app operation lock for the duration of the pull (returned as the
+// release func), so start/stop/delete/deploy operations on the same app
+// cannot interleave with the pull+extract. Callers defer ClosePullChannel
+// and the release func.
+func (m *Manager) TryStartPull(appID string) (ch chan string, release func(), ok bool) {
+	unlock := m.LockApp(appID)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, busy := m.pulls[appID]; busy {
-		return nil, false
+		m.mu.Unlock()
+		unlock()
+		return nil, nil, false
 	}
-	ch := make(chan string, 64)
+	ch = make(chan string, 64)
 	m.pulls[appID] = ch
-	return ch, true
+	m.mu.Unlock()
+	return ch, unlock, true
 }
 
 // PullChannel returns the active pull progress channel, or nil.
@@ -280,11 +339,14 @@ func (m *Manager) ClosePullChannel(appID string) {
 }
 
 // RemoveApp cleans up all in-memory state for a deleted app.
+// The caller must hold the app's operation lock (guarantees no pull or
+// process operation is in flight for this app).
 func (m *Manager) RemoveApp(appID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.logs, appID)
 	delete(m.health, appID)
+	delete(m.opLocks, appID)
 	if cancel, ok := m.pingers[appID]; ok {
 		cancel()
 		delete(m.pingers, appID)

@@ -12,6 +12,12 @@ import (
 func (srv *Server) getLogsSSE(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
+	// Unknown IDs get a 404 — otherwise hitting /apps/<random>/logs would
+	// materialize a permanent in-memory log buffer per garbage ID.
+	if app := srv.mustGetApp(w, r); app == nil {
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)

@@ -6,11 +6,14 @@ import (
 	"debug/elf"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"apphive/internal/store"
 )
@@ -20,18 +23,21 @@ type Process struct {
 	cmd      *exec.Cmd
 	cancel   context.CancelFunc
 	logs     *LogBuffer
-	done     chan struct{}
-	stopping int32 // atomic; 1 = intentional stop (don't mark as crashed)
+	exited   chan struct{} // closed by wait() once the OS process has exited
+	done     chan struct{} // closed by the manager AFTER removing it from the process registry
+	stopping int32         // atomic; 1 = intentional stop (don't mark as crashed)
 }
 
 // startProcess launches a subprocess for the given app.
-// The caller must hold the manager lock while calling this.
+// The caller must hold the app's per-app operation lock while calling this.
 func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	if len(app.Entrypoint) == 0 && len(app.Command) == 0 {
 		return nil, fmt.Errorf("no entrypoint or command configured — pull the image first or set an override")
 	}
 
-	rawArgv := append(app.Entrypoint, app.Command...)
+	// Copy defensively: append could otherwise write into the store's shared
+	// entrypoint backing array if it has spare capacity.
+	rawArgv := append(append([]string{}, app.Entrypoint...), app.Command...)
 	useChroot := app.RootfsPath != "" && chrootEnabled
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -61,12 +67,19 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		// Used on non-Linux platforms (dev builds) and on Linux containers
 		// that lack CAP_SYS_CHROOT (SSH-only PaaS containers).
 		//
-		// Step 1: prefix every absolute argv token with the rootfs path so
-		// the kernel can find and exec the binary on the host filesystem.
+		// Step 1: prefix every container-absolute argv token with the rootfs
+		// path so the kernel can find and exec the binary on the host
+		// filesystem. (isContainerAbs, not filepath.IsAbs: on Windows
+		// "/usr/bin/node" is not an absolute host path.)
 		argv := make([]string, len(rawArgv))
 		for i, a := range rawArgv {
-			if app.RootfsPath != "" && filepath.IsAbs(a) {
-				argv[i] = filepath.Join(app.RootfsPath, a)
+			if app.RootfsPath != "" && isContainerAbs(a) {
+				prefixed, err := joinUnderRoot(app.RootfsPath, a)
+				if err != nil {
+					cancel()
+					return nil, fmt.Errorf("invalid path in args: %w", err)
+				}
+				argv[i] = prefixed
 			} else {
 				argv[i] = a
 			}
@@ -74,16 +87,29 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		// If argv[0] is a bare name (e.g. "node", "python3") resolve it
 		// inside the rootfs — otherwise exec.CommandContext would search
 		// the HOST PATH and exec the wrong (or no) binary.
-		if app.RootfsPath != "" && !filepath.IsAbs(argv[0]) {
-			if resolved := lookPathInRootfs(argv[0], app.RootfsPath); filepath.IsAbs(resolved) {
-				argv[0] = filepath.Join(app.RootfsPath, resolved)
+		if app.RootfsPath != "" && !isContainerAbs(argv[0]) {
+			resolved := lookPathInRootfs(argv[0], app.RootfsPath)
+			if !isContainerAbs(resolved) {
+				cancel()
+				return nil, fmt.Errorf("command %q not found in image rootfs (searched standard bin directories) — refusing to fall back to the host PATH", rawArgv[0])
 			}
+			prefixed, err := joinUnderRoot(app.RootfsPath, resolved)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+			argv[0] = prefixed
 		}
 		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
 
 		if app.RootfsPath != "" {
 			if app.WorkDir != "" {
-				cmd.Dir = filepath.Join(app.RootfsPath, app.WorkDir)
+				dir, err := joinUnderRoot(app.RootfsPath, app.WorkDir)
+				if err != nil {
+					cancel()
+					return nil, fmt.Errorf("invalid work_dir: %w", err)
+				}
+				cmd.Dir = dir
 			} else {
 				cmd.Dir = app.RootfsPath
 			}
@@ -111,7 +137,11 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		if app.RootfsPath != "" {
 			interp := readELFInterpreter(cmd.Path)
 			if interp != "" {
-				interpHost := filepath.Join(app.RootfsPath, interp)
+				interpHost, jerr := joinUnderRoot(app.RootfsPath, interp)
+				if jerr != nil {
+					cancel()
+					return nil, fmt.Errorf("invalid ELF interpreter path: %w", jerr)
+				}
 				if _, err := os.Stat(interpHost); err == nil {
 					libDirs := findRootfsLibDirs(app.RootfsPath)
 					newArgv := []string{interpHost}
@@ -123,7 +153,11 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 					cmd.Args = newArgv
 				}
 			} else if shell, arg := readShebang(cmd.Path); shell != "" {
-				shellHost := filepath.Join(app.RootfsPath, shell)
+				shellHost, jerr := joinUnderRoot(app.RootfsPath, shell)
+				if jerr != nil {
+					cancel()
+					return nil, fmt.Errorf("invalid shebang interpreter path: %w", jerr)
+				}
 				if _, err := os.Stat(shellHost); err == nil {
 					newArgv := []string{shellHost}
 					if arg != "" {
@@ -137,7 +171,11 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 					// without it the host's ld.so loads the rootfs's libc,
 					// causing GLIBC_PRIVATE symbol mismatches.
 					if shellInterp := readELFInterpreter(shellHost); shellInterp != "" {
-						shellInterpHost := filepath.Join(app.RootfsPath, shellInterp)
+						shellInterpHost, jerr2 := joinUnderRoot(app.RootfsPath, shellInterp)
+						if jerr2 != nil {
+							cancel()
+							return nil, fmt.Errorf("invalid shebang ELF interpreter path: %w", jerr2)
+						}
 						if _, serr := os.Stat(shellInterpHost); serr == nil {
 							libDirs := findRootfsLibDirs(app.RootfsPath)
 							wrappedArgv := []string{shellInterpHost}
@@ -198,20 +236,21 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		return nil, fmt.Errorf("start process: %w", err)
 	}
 
-	p := &Process{cmd: cmd, cancel: cancel, logs: logs, done: make(chan struct{})}
+	p := &Process{cmd: cmd, cancel: cancel, logs: logs, exited: make(chan struct{}), done: make(chan struct{})}
 
 	// Pipe stdout/stderr into the log buffer.
 	go pipeLines(stdout, logs)
 	go pipeLines(stderr, logs)
 
 	// For the chroot case the exec.Cmd has no ctx wired in, so we watch the
-	// context ourselves and kill the process group when it is cancelled.
+	// context ourselves and force-kill the process group when it is cancelled
+	// (cancel is only called from stop(), after the SIGTERM grace period).
 	if useChroot {
 		go func() {
 			select {
 			case <-ctx.Done():
-				killProcessGroup(p.cmd.Process.Pid)
-			case <-p.done:
+				killProcessGroupForce(p.cmd.Process.Pid)
+			case <-p.exited:
 			}
 		}()
 	}
@@ -241,6 +280,13 @@ func buildEnv(appEnv []store.EnvVar) []string {
 	}
 	if !hasHome {
 		env = append(env, "HOME=/root")
+	}
+	// Windows needs SYSTEMROOT in the child environment for DNS resolution,
+	// TLS root stores, and other OS facilities.
+	if goruntime.GOOS == "windows" {
+		if v := os.Getenv("SYSTEMROOT"); v != "" {
+			env = append(env, "SYSTEMROOT="+v)
+		}
 	}
 	return env
 }
@@ -363,15 +409,23 @@ func readShebang(path string) (interp, arg string) {
 	return interp, arg
 }
 
+// isContainerAbs reports whether p is absolute in container-path semantics
+// (starts with "/"). Unlike filepath.IsAbs this works on Windows dev builds,
+// where container-style "/usr/bin/node" is not an absolute host path.
+func isContainerAbs(p string) bool {
+	return strings.HasPrefix(p, "/")
+}
+
 // lookPathInRootfs resolves a command name within the extracted rootfs.
 //   - Absolute paths (e.g. "/usr/bin/python3") are returned unchanged; the
 //     chroot maps them automatically.
 //   - Bare names (e.g. "python", "node", "go") are searched in standard bin
 //     dirs inside the rootfs; the chroot-relative absolute path is returned
 //     (e.g. "/usr/bin/python3") so the kernel can exec it after chroot().
-//   - Returns the original name if nothing is found; exec() surfaces the error.
+//   - Returns the original name if nothing is found; callers must treat that
+//     as "not found in the image" (never fall back to the host PATH).
 func lookPathInRootfs(name, rootfsPath string) string {
-	if filepath.IsAbs(name) {
+	if isContainerAbs(name) {
 		return name
 	}
 	for _, dir := range []string{
@@ -389,15 +443,14 @@ func lookPathInRootfs(name, rootfsPath string) string {
 // ensureChrootDNS copies /etc/resolv.conf and /etc/hosts from the host into
 // the rootfs so DNS and hostname resolution work inside the chroot. Docker
 // normally injects these at runtime; we do the same before exec().
+// Writes never traverse planted rootfs symlinks (writeRootfsFileNoFollow).
 func ensureChrootDNS(rootfsPath string) {
 	for _, f := range []string{"/etc/resolv.conf", "/etc/hosts"} {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			continue
 		}
-		dst := filepath.Join(rootfsPath, f)
-		_ = os.MkdirAll(filepath.Dir(dst), 0755)
-		_ = os.WriteFile(dst, data, 0644)
+		writeRootfsFileNoFollow(rootfsPath, f, data, 0644)
 	}
 }
 
@@ -405,16 +458,19 @@ func ensureChrootDNS(rootfsPath string) {
 //
 // It removes only things that are guaranteed never needed at runtime:
 //   - Package-manager caches (/var/cache, /var/lib/apt, /var/lib/dpkg/info)
-//   - Build-time temp files (/tmp, /var/tmp)
+//   - Contents of the temp dirs (/tmp, /var/tmp — recreated empty with 1777)
 //   - Documentation (/usr/share/doc, /usr/share/man, /usr/share/info)
 //
 // Everything else — shared libraries, language runtimes, Python/Node packages,
 // binaries, and critically /etc (resolv.conf, nsswitch.conf, hosts) — is kept
 // intact so the chrooted process continues to work at runtime.
 //
+// This runs BEFORE the app starts (never on a running app), so no runtime
+// temp files are deleted out from under it. All removals and writes are
+// containment-checked so a malicious rootfs with escaping symlinks (e.g.
+// etc → /etc on the host) cannot redirect them outside the rootfs.
+//
 // Typical savings: 50–200 MB for a python:slim image, 20–80 MB for alpine.
-// After pruning it also refreshes the host DNS config in /etc so long-running
-// apps always have up-to-date nameserver addresses.
 func PruneRootfsKeepDNS(rootfsPath string) error {
 	// Directories safe to delete: caches, docs, build-time junk.
 	safeToRemove := []string{
@@ -432,27 +488,72 @@ func PruneRootfsKeepDNS(rootfsPath string) error {
 		// data or user configs there that are needed across restarts.
 	}
 	for _, rel := range safeToRemove {
-		_ = os.RemoveAll(filepath.Join(rootfsPath, rel))
+		target, err := joinUnderRoot(rootfsPath, rel)
+		if err != nil {
+			continue
+		}
+		if !containedWithin(rootfsPath, target) {
+			log.Printf("prune: refusing to remove %s — resolves outside the rootfs", target)
+			continue
+		}
+		// RemoveAll removes a final-component symlink itself rather than
+		// following it, so with the verified parent chain this is host-safe.
+		_ = os.RemoveAll(target)
+	}
+	// Recreate the temp dirs removed above — they are RUNTIME directories,
+	// and apps fail with ENOENT if /tmp does not exist.
+	for _, rel := range []string{"tmp", "var/tmp"} {
+		target, err := joinUnderRoot(rootfsPath, rel)
+		if err != nil || !containedWithin(rootfsPath, filepath.Dir(target)) {
+			continue
+		}
+		if err := os.MkdirAll(target, 0755); err == nil {
+			_ = os.Chmod(target, 01777) // sticky bit, like a real /tmp
+		}
 	}
 	// Refresh nameserver config from host so chrooted processes always see
 	// up-to-date DNS (Docker / Northflank may rotate the nameserver IP).
 	for _, f := range []string{"resolv.conf", "hosts"} {
 		if data, err := os.ReadFile(filepath.Join("/etc", f)); err == nil {
-			dst := filepath.Join(rootfsPath, "etc", f)
-			_ = os.MkdirAll(filepath.Dir(dst), 0755)
-			_ = os.WriteFile(dst, data, 0644)
+			writeRootfsFileNoFollow(rootfsPath, "/etc/"+f, data, 0644)
 		}
 	}
 	return nil
 }
 
-const scannerBufSize = 512 * 1024 // 512 KB — handles most log lines
+// maxLogLineBytes caps a single captured log line. Longer lines are truncated
+// (with a marker) instead of killing the whole log stream, which is what
+// bufio.Scanner did silently once a line exceeded its buffer.
+const maxLogLineBytes = 64 * 1024
 
 func pipeLines(r io.Reader, buf *LogBuffer) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, scannerBufSize), scannerBufSize)
-	for scanner.Scan() {
-		buf.Write(scanner.Text())
+	br := bufio.NewReaderSize(r, 32*1024)
+	var sb strings.Builder
+	draining := false // discarding the remainder of an over-long line
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(chunk) > 0 && !draining {
+			if sb.Len()+len(chunk) > maxLogLineBytes {
+				if keep := maxLogLineBytes - sb.Len(); keep > 0 {
+					sb.Write(chunk[:keep])
+				}
+				sb.WriteString(" … [truncated]")
+				draining = true
+			} else {
+				sb.Write(chunk)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue // line continues past the buffer — keep reading it
+		}
+		if sb.Len() > 0 {
+			buf.Write(strings.TrimRight(sb.String(), "\r\n"))
+			sb.Reset()
+			draining = false
+		}
+		if err != nil { // io.EOF or a real read error — stream is over
+			return
+		}
 	}
 }
 
@@ -467,20 +568,46 @@ func (p *Process) isStopping() bool {
 	return atomic.LoadInt32(&p.stopping) == 1
 }
 
-// stop signals the process group to exit gracefully, then cancels the context.
+const (
+	// stopGracePeriod is how long an app has to exit after SIGTERM...
+	stopGracePeriod = 10 * time.Second
+	// ...before the process group is SIGKILLed, after which we wait this
+	// long for teardown before giving up (the watcher still reaps it).
+	stopKillPeriod = 5 * time.Second
+)
+
+// stop stops the process with escalation: SIGTERM to the whole process group,
+// a grace period, then SIGKILL so a process that ignores SIGTERM is actually
+// torn down. It returns once the process has exited (or the kill wait timed
+// out, in which case the manager still finishes bookkeeping via the watcher).
 func (p *Process) stop() {
 	p.markStopping()
 	if p.cmd.Process != nil {
-		killProcessGroup(p.cmd.Process.Pid)
-		p.cmd.Process.Signal(os.Interrupt)
+		terminateProcessGroup(p.cmd.Process.Pid)
+	}
+	// Grace period: let the app shut down cleanly.
+	select {
+	case <-p.exited:
+		p.cancel()
+		return
+	case <-time.After(stopGracePeriod):
+	}
+	// Escalate: SIGKILL the whole group, and cancel the context (non-chroot
+	// CommandContext kills the leader; the chroot ctx-watcher force-kills).
+	if p.cmd.Process != nil {
+		killProcessGroupForce(p.cmd.Process.Pid)
 	}
 	p.cancel()
+	select {
+	case <-p.exited:
+	case <-time.After(stopKillPeriod):
+	}
 }
 
 // wait blocks until the process exits and returns the exit error (nil = clean exit).
 func (p *Process) wait() error {
 	err := p.cmd.Wait()
-	close(p.done)
+	close(p.exited)
 	return err
 }
 

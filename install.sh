@@ -1,16 +1,26 @@
 #!/bin/sh
 # pocketpaas interactive installer for SSH-only containers
 # Usage: curl -fsSL https://raw.githubusercontent.com/foxy1402/pocketpaas/main/install.sh | sh
-set -e
+set -eu
 
 REPO="foxy1402/pocketpaas"
 BIN="$HOME/pocketpaas"
 CFG_DIR="$HOME/.pocketpaas"
 START_SCRIPT="$CFG_DIR/start.sh"
 LOG_FILE="$CFG_DIR/pocketpaas.log"
+DL_DIR=""
 
 # ── Platform detection ────────────────────────────────────────────────────────
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+# Releases and the source-build toolchain below are Linux-only — bail out early.
+case "$OS" in
+  linux) ;;
+  *)
+    printf 'Unsupported OS: %s (only Linux is supported).\n' "$OS" >&2
+    printf 'Tip: run pocketpaas inside a Linux container or VM instead.\n' >&2
+    exit 1
+    ;;
+esac
 case "$(uname -m)" in
   x86_64)        ARCH=amd64 ;;
   aarch64|arm64) ARCH=arm64 ;;
@@ -20,15 +30,20 @@ esac
 # ── Port availability check ─────────────────────────────────────────────────
 # Returns 0 (true) if the port is already bound on the local machine.
 port_in_use() {
-  local p hex
-  p="$1"
-  hex="$(printf '%04X' "$p")"
-  # /proc/net/tcp and /proc/net/tcp6 list every bound socket (port in uppercase hex).
-  # \b word-boundary handles both mid-line and end-of-line socket entries.
-  grep -qsEi ":${hex}\b" /proc/net/tcp /proc/net/tcp6 2>/dev/null && return 0
+  _pup_hex="$(printf '%04X' "$1")"
+  # /proc/net/tcp and /proc/net/tcp6 list kernel sockets: field 2 is
+  # local_address ("<hex-addr>:<PORT>") and field 4 the socket state.
+  # State 0A is LISTEN — other states (TIME_WAIT, CLOSE_WAIT, ...) must NOT
+  # count as "in use", or stale connections cause false positives.
+  for _pup_f in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$_pup_f" ] || continue
+    if awk -v hex="$_pup_hex" '$2 ~ (":" hex "$") && $4 == "0A" { f=1 } END { exit (f ? 0 : 1) }' "$_pup_f" 2>/dev/null; then
+      return 0
+    fi
+  done
   # Fallback: ss (iproute2, available on most distros)
   if command -v ss >/dev/null 2>&1; then
-    ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":${p}$" && return 0
+    ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":$1$" && return 0
   fi
   return 1
 }
@@ -84,17 +99,21 @@ PREV_PORT=""
 PREV_NGROK_AUTHTOKEN=""
 PREV_NGROK_DOMAIN=""
 
-# Check if pocketpaas is currently running.
-if pgrep -xf "$BIN" >/dev/null 2>&1; then
+# Check if pocketpaas is currently running (skip gracefully if pgrep is absent).
+if command -v pgrep >/dev/null 2>&1 && pgrep -xf "$BIN" >/dev/null 2>&1; then
   WAS_RUNNING=1
   printf '  ⚠  pocketpaas is currently running.\n'
   _stop="$(ask 'Stop it before updating? (Y/n)' 'y')"
   case "$_stop" in
     n|N) printf '  Continuing without stopping.\n' ;;
     *)
-      pkill -xf "$BIN" 2>/dev/null || true
-      sleep 1
-      printf '  Stopped.\n'
+      if command -v pkill >/dev/null 2>&1; then
+        pkill -xf "$BIN" 2>/dev/null || true
+        sleep 1
+        printf '  Stopped.\n'
+      else
+        printf '  pkill not available — please stop pocketpaas manually if needed.\n'
+      fi
       ;;
   esac
   printf '\n'
@@ -203,17 +222,49 @@ mkdir -p "$CFG_DIR"
 
 printf '  ─────────────────────────────────────────\n\n'
 
-DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/pocketpaas-$OS-$ARCH"
+ASSET="pocketpaas-$OS-$ARCH"
+DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET"
+CHECKSUMS_URL="https://github.com/$REPO/releases/latest/download/checksums.txt"
+
+# Stage payloads in a temp dir next to $BIN so the final mv -f is an atomic
+# rename on the same filesystem. Rename over a running binary is allowed,
+# unlike writing to it directly (which fails with ETXTBSY, "text file busy").
+DL_DIR="$(dirname "$BIN")/.pp-download.$$"
+cleanup_dl() { if [ -n "$DL_DIR" ]; then rm -rf "$DL_DIR"; fi; }
+trap cleanup_dl EXIT INT TERM
+mkdir -p "$DL_DIR"
+
 printf '==> Downloading binary...\n'
-if curl -fsSL "$DOWNLOAD_URL" -o "$BIN" 2>/dev/null; then
-  chmod +x "$BIN"
+if curl -fsSL "$DOWNLOAD_URL" -o "$DL_DIR/$ASSET" 2>/dev/null; then
+  # Verify the download against checksums.txt published by the release workflow.
+  if [ "${PP_SKIP_CHECKSUM:-0}" = "1" ]; then
+    printf '  ⚠  PP_SKIP_CHECKSUM=1 — skipping checksum verification.\n'
+  elif ! command -v sha256sum >/dev/null 2>&1; then
+    printf '  ⚠  sha256sum not available — skipping checksum verification.\n'
+  elif curl -fsSL "$CHECKSUMS_URL" -o "$DL_DIR/checksums.txt" 2>/dev/null; then
+    printf '==> Verifying checksum...\n'
+    # Run from the staging dir so the relative filenames in checksums.txt resolve.
+    if ! (cd "$DL_DIR" && sha256sum -c --ignore-missing checksums.txt); then
+      printf 'ERROR: checksum verification failed for %s — aborting.\n' "$ASSET" >&2
+      exit 1
+    fi
+  else
+    printf '  ⚠  Could not download checksums.txt (older release?) — skipping checksum verification.\n'
+  fi
+  chmod +x "$DL_DIR/$ASSET"
+  mv -f "$DL_DIR/$ASSET" "$BIN"
+  cleanup_dl
+  trap - EXIT INT TERM
   printf '==> Downloaded → %s\n' "$BIN"
 else
   printf '==> No pre-built release found; building from source...\n'
 
   # Install Go if missing
   if ! command -v go >/dev/null 2>&1; then
-    GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 || echo go1.23.4)"
+    # NOTE: the pipeline's exit status is head's, so "|| echo <default>" would
+    # never fire on curl failure. Capture first, then default empty values.
+    GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1)"
+    : "${GO_VERSION:=go1.23.4}"
     printf '==> Installing %s...\n' "$GO_VERSION"
     # Target environment is always a Linux container — hardcode linux here.
     curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C "$HOME" -xz
@@ -227,9 +278,13 @@ else
   git clone --depth=1 "https://github.com/$REPO" "$TMP/src"
   printf '==> Building (this may take a minute)...\n'
   cd "$TMP/src"
-  CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BIN" ./cmd/server
+  CGO_ENABLED=0 go build -ldflags="-s -w" -o "$DL_DIR/$ASSET" ./cmd/server
   cd /
   rm -rf "$TMP"
+  chmod +x "$DL_DIR/$ASSET"
+  mv -f "$DL_DIR/$ASSET" "$BIN"
+  cleanup_dl
+  trap - EXIT INT TERM
   printf '==> Built from source → %s\n' "$BIN"
 fi
 

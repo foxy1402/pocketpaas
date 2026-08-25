@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/uuid"
 
 	"apphive/internal/auth"
@@ -20,38 +22,63 @@ import (
 
 // ---- Auth ----
 
-// failedLoginDelay is the fixed delay before processing another login attempt,
-// slowing online brute-force guessing to a practical crawl.
+// failedLoginDelay is the per-attempt delay on failure. Combined with
+// LoginLockedOut/RecordLoginFailure this slows parallel brute-force guessing:
+// the delay caps per-request throughput and lockouts block repeat offenders.
 const failedLoginDelay = 500 * time.Millisecond
 
 func (srv *Server) getLogin(w http.ResponseWriter, r *http.Request) {
-	srv.render(w, "login.html", map[string]any{"Error": ""})
+	token := auth.CSRFCookieValue(r)
+	if token == "" {
+		var err error
+		token, err = auth.RandomToken()
+		if err != nil {
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
+		auth.SetCSRFCookie(w, token, isSecureRequest(r))
+	}
+	srv.render(w, "login.html", map[string]any{"Error": "", "CsrfToken": token})
 }
 
 func (srv *Server) postLogin(w http.ResponseWriter, r *http.Request) {
+	if !auth.ValidLoginCSRF(r) {
+		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		return
+	}
+	key := clientIP(r)
+	if wait, locked := srv.auth.LoginLockedOut(key); locked {
+		srv.renderLogin(w, r, "Too many failed attempts — try again in "+wait.String()+".")
+		return
+	}
 	password := r.FormValue("password")
 	if !srv.auth.CheckPassword(password) {
+		srv.auth.RecordLoginFailure(key)
 		time.Sleep(failedLoginDelay)
-		srv.render(w, "login.html", map[string]any{"Error": "Invalid password."})
+		srv.renderLogin(w, r, "Invalid password.")
 		return
 	}
+	srv.auth.RecordLoginSuccess(key)
 	token, err := srv.auth.CreateSession()
-	if err != nil {
-		http.Error(w, "session error", http.StatusInternalServerError)
-		return
-	}
-	csrf, err := auth.RandomToken()
 	if err != nil {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
 	secure := isSecureRequest(r)
 	auth.SetCookie(w, token, secure)
-	auth.SetCSRFCookie(w, csrf, secure)
+	// The readable CSRF cookie carries the session-bound token so JS forms
+	// and HTMX can submit it; validation compares against the HMAC, not the
+	// cookie, so a planted cookie alone cannot forge a valid pair.
+	auth.SetCSRFCookie(w, srv.auth.CSRFForSession(token), secure)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (srv *Server) getLogout(w http.ResponseWriter, r *http.Request) {
+// renderLogin re-renders the login page with an error, refreshing the CSRF token.
+func (srv *Server) renderLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
+	srv.render(w, "login.html", map[string]any{"Error": errMsg, "CsrfToken": auth.CSRFCookieValue(r)})
+}
+
+func (srv *Server) postLogout(w http.ResponseWriter, r *http.Request) {
 	if token := auth.TokenFromRequest(r); token != "" {
 		srv.auth.DeleteSession(token)
 	}
@@ -146,13 +173,31 @@ func (srv *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	if app == nil {
 		return
 	}
+	// Hold the app lock for the whole delete: no pull can be extracting
+	// (postPullApp holds the same lock) and no start can slip in between the
+	// IsRunning check and the store delete (leaving an unmanaged ghost process).
+	unlock, ok := srv.manager.TryLockApp(app.ID)
+	if !ok {
+		http.Error(w, "another operation is in progress for this app (pull/start/stop) — try again shortly", http.StatusConflict)
+		return
+	}
+	defer unlock()
+
 	if srv.manager.IsRunning(app.ID) {
-		_ = srv.manager.Stop(app.ID)
+		// We already hold the app lock — Stop would deadlock on TryLockApp.
+		_ = srv.manager.StopLocked(app.ID)
 	}
 	// Clean up in-memory manager state (log buffers, health map, pingers).
 	srv.manager.RemoveApp(app.ID)
-	// Remove extracted rootfs from disk.
-	os.RemoveAll(filepath.Join(srv.dataDir, "apps", app.ID))
+
+	// Remove extracted rootfs from disk — verified to stay under dataDir/apps
+	// (imported app IDs are validated, but never trust a join with user data).
+	appDir := filepath.Join(srv.dataDir, "apps", app.ID)
+	if !hasPathPrefix(appDir, filepath.Join(srv.dataDir, "apps")) {
+		log.Printf("refusing to remove path outside apps dir: %s (app %s)", appDir, app.ID)
+	} else {
+		os.RemoveAll(appDir)
+	}
 
 	if err := srv.store.Delete(app.ID); err != nil {
 		srv.serverError(w, err)
@@ -162,10 +207,61 @@ func (srv *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// hasPathPrefix reports whether child is strictly contained in parent.
+func hasPathPrefix(child, parent string) bool {
+	c, p := filepath.Clean(child), filepath.Clean(parent)
+	return c != p && strings.HasPrefix(c+string(filepath.Separator), p+string(filepath.Separator))
+}
+
 // ---- Pull ----
 
 // pullTimeout is the maximum time allowed for a single image pull+extract.
 const pullTimeout = 30 * time.Minute
+
+// sendPullLine sends a progress line without ever blocking: if the channel is
+// full (e.g. no SSE client is consuming, as in pull-all), the line is dropped
+// rather than hanging the pull goroutine forever — which previously leaked
+// the pull slot and wedged the app at "pull already in progress".
+func sendPullLine(ch chan<- string, msg string) {
+	select {
+	case ch <- msg:
+	default:
+		log.Printf("pull: dropped progress line (consumer not draining)")
+	}
+}
+
+// extractAndSwap extracts img into a staging directory next to destDir and,
+// only on success, swaps it into place. A failed or timed-out extract leaves
+// the previous working rootfs untouched instead of clobbering it with a
+// half-written mix of old and new layers.
+func extractAndSwap(ctx context.Context, img v1.Image, destDir string, ch chan<- string) error {
+	staging := destDir + ".staging"
+	old := destDir + ".old"
+	os.RemoveAll(staging)
+
+	if err := registry.Extract(ctx, img, staging, ch); err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+
+	// Publish: move the previous rootfs aside, move staging into place,
+	// then drop the old tree. Rename within the same directory is atomic.
+	os.RemoveAll(old)
+	hadOld := false
+	if _, err := os.Stat(destDir); err == nil {
+		if err := os.Rename(destDir, old); err == nil {
+			hadOld = true
+		}
+	}
+	if err := os.Rename(staging, destDir); err != nil {
+		if hadOld {
+			_ = os.Rename(old, destDir) // restore the previous rootfs
+		}
+		return fmt.Errorf("promote staged rootfs: %w", err)
+	}
+	os.RemoveAll(old)
+	return nil
+}
 
 // runPull executes a full pull+extract cycle for one app, sending progress to ch.
 // It is shared between single-app and pull-all flows.
@@ -175,18 +271,18 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 		creds = srv.regCreds
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), pullTimeout)
+	ctx, cancel := context.WithTimeout(srv.shutdownCtx, pullTimeout)
 	defer cancel()
 
 	img, err := registry.Pull(ctx, imageRef, creds, ch)
 	if err != nil {
-		ch <- "ERROR: " + err.Error()
+		sendPullLine(ch, "ERROR: "+err.Error())
 		_ = srv.store.UpdateStatus(appID, store.StatusError)
 		return
 	}
 
-	if err := registry.Extract(ctx, img, destDir, ch); err != nil {
-		ch <- "ERROR: " + err.Error()
+	if err := extractAndSwap(ctx, img, destDir, ch); err != nil {
+		sendPullLine(ch, "ERROR: "+err.Error())
 		_ = srv.store.UpdateStatus(appID, store.StatusError)
 		return
 	}
@@ -215,13 +311,13 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 			detected = append(detected, fmt.Sprintf("port=%d", port))
 		}
 		if len(detected) > 0 {
-			ch <- "Auto-configured from image: " + strings.Join(detected, ", ")
+			sendPullLine(ch, "Auto-configured from image: "+strings.Join(detected, ", "))
 		}
 	}
 
 	_ = srv.store.UpdateRootfsPath(appID, destDir)
 	_ = srv.store.UpdateStatus(appID, store.StatusStopped)
-	ch <- "DONE"
+	sendPullLine(ch, "DONE")
 }
 
 func (srv *Server) postPullApp(w http.ResponseWriter, r *http.Request) {
@@ -233,18 +329,36 @@ func (srv *Server) postPullApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stop the app before pulling a new image", http.StatusConflict)
 		return
 	}
-	// Atomically acquire the pull slot — races the check against another request.
-	ch, ok := srv.manager.TryAcquirePull(app.ID)
+	// Atomically acquire the pull slot AND the per-app operation lock (held
+	// by the pull goroutine until ClosePullChannel), so start/stop/delete on
+	// the same app cannot interleave with the extraction.
+	ch, release, ok := srv.manager.TryStartPull(app.ID)
 	if !ok {
 		http.Error(w, "pull already in progress", http.StatusConflict)
 		return
 	}
+	// Recheck under the lock we now hold — a start that raced us above has
+	// either finished by now or is blocked on the app lock.
+	if srv.manager.IsRunning(app.ID) {
+		srv.manager.ClosePullChannel(app.ID)
+		release()
+		http.Error(w, "stop the app before pulling a new image", http.StatusConflict)
+		return
+	}
+
+	destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
+	if !hasPathPrefix(destDir, filepath.Join(srv.dataDir, "apps")) {
+		srv.manager.ClosePullChannel(app.ID)
+		release()
+		http.Error(w, "invalid app id", http.StatusBadRequest)
+		return
+	}
 
 	_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
-	destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
 
 	go func() {
 		defer srv.manager.ClosePullChannel(app.ID)
+		defer release()
 		srv.runPull(app.ID, app.ImageRef, destDir, app.Entrypoint, app.Command, app.WorkDir, app.ExposedPort, ch)
 	}()
 
@@ -281,6 +395,9 @@ func (srv *Server) getPullProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if ch == nil {
 		fmt.Fprintf(w, "data: No active pull.\n\n")
+		// Also emit the done event so the page reloads and clears the
+		// "pulling" state instead of spinning on EventSource reconnects.
+		fmt.Fprintf(w, "event: done\ndata: done\n\n")
 		flusher.Flush()
 		return
 	}
@@ -324,17 +441,29 @@ func (srv *Server) postPullAll(w http.ResponseWriter, r *http.Request) {
 			app.Status != store.StatusCrashed {
 			continue
 		}
-		// Atomically acquire the pull slot; skip apps already being pulled.
-		ch, ok := srv.manager.TryAcquirePull(app.ID)
+		// Atomically acquire the pull slot + app op lock; skip busy apps,
+		// and recheck running under the lock (a start may have raced us).
+		ch, release, ok := srv.manager.TryStartPull(app.ID)
 		if !ok {
 			continue
 		}
-		_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
+		if srv.manager.IsRunning(app.ID) {
+			srv.manager.ClosePullChannel(app.ID)
+			release()
+			continue
+		}
 		destDir := filepath.Join(srv.dataDir, "apps", app.ID, "rootfs")
-		go func(a *store.App, dest string, ch chan string) {
+		if !hasPathPrefix(destDir, filepath.Join(srv.dataDir, "apps")) {
+			srv.manager.ClosePullChannel(app.ID)
+			release()
+			continue
+		}
+		_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
+		go func(a *store.App, dest string, ch chan string, release func()) {
 			defer srv.manager.ClosePullChannel(a.ID)
+			defer release()
 			srv.runPull(a.ID, a.ImageRef, dest, a.Entrypoint, a.Command, a.WorkDir, a.ExposedPort, ch)
-		}(app, destDir, ch)
+		}(app, destDir, ch, release)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -488,4 +617,21 @@ func (srv *Server) parseAppForm(r *http.Request, existing *store.App) (*store.Ap
 
 func isSecureRequest(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// clientIP identifies the client for login rate limiting. The first
+// X-Forwarded-For entry is preferred because ngrok (and other reverse
+// proxies) terminate at their edge; without it every tunneled user would
+// share one bucket. Behind untrusted proxies XFF can be spoofed to dodge
+// lockout — the per-request failure delay remains as a floor.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if ip, _, _ := strings.Cut(xff, ","); strings.TrimSpace(ip) != "" {
+			return strings.TrimSpace(ip)
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

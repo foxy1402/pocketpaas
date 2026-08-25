@@ -1,6 +1,11 @@
 # Compiled local binaries (never needed in the Docker build context)
 apphive
 apphive.exe
+pocketpaas
+pocketpaas.exe
+
+# Agent tooling
+.agents/
 
 # Runtime data
 *.db

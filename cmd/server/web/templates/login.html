@@ -20,6 +20,7 @@
         <div class="form-error-item mb-3">{{.Error}}</div>
         {{end}}
         <form method="POST" action="/login" autocomplete="on">
+          <input type="hidden" name="_csrf" value="{{.CsrfToken}}">
           <div class="form-group">
             <label class="form-label" for="password">Password</label>
             <input

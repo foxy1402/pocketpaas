@@ -34,9 +34,17 @@ func setSysProcAttr(cmd *exec.Cmd, rootfsPath string) {
 	}
 }
 
-// killProcessGroup sends SIGTERM to the entire process group.
-func killProcessGroup(pid int) {
+// terminateProcessGroup sends SIGTERM to the entire process group.
+func terminateProcessGroup(pid int) {
 	if pid > 0 {
 		syscall.Kill(-pid, syscall.SIGTERM)
+	}
+}
+
+// killProcessGroupForce sends SIGKILL to the entire process group — used when
+// the SIGTERM grace period expires so stubborn processes actually die.
+func killProcessGroupForce(pid int) {
+	if pid > 0 {
+		syscall.Kill(-pid, syscall.SIGKILL)
 	}
 }

@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/subtle"
 	"net/http"
+	"strings"
 )
 
 const cookieName = "apphive_session"
@@ -17,7 +18,10 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		if requiresCSRF(r.Method) && !validCSRF(r) {
+		// Slide the cookie lifetime along with the server-side session TTL,
+		// otherwise active users are hard-logged-out at the static MaxAge.
+		SetCookie(w, cookie.Value, secureRequest(r))
+		if requiresCSRF(r.Method) && !m.validCSRF(r, cookie.Value) {
 			http.Error(w, "invalid csrf token", http.StatusForbidden)
 			return
 		}
@@ -75,6 +79,26 @@ func TokenFromRequest(r *http.Request) string {
 	return c.Value
 }
 
+// CSRFCookieValue returns the current CSRF cookie value, or "" if absent.
+func CSRFCookieValue(r *http.Request) string {
+	c, err := r.Cookie(csrfCookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// ValidLoginCSRF checks the double-submit-cookie token on the pre-auth login
+// form (which has no session yet, so session-bound tokens cannot apply).
+func ValidLoginCSRF(r *http.Request) bool {
+	cookie := CSRFCookieValue(r)
+	submitted := r.FormValue("_csrf")
+	if cookie == "" || submitted == "" || len(submitted) != len(cookie) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(submitted), []byte(cookie)) == 1
+}
+
 func requiresCSRF(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
@@ -84,17 +108,22 @@ func requiresCSRF(method string) bool {
 	}
 }
 
-func validCSRF(r *http.Request) bool {
-	cookie, err := r.Cookie(csrfCookieName)
-	if err != nil || cookie.Value == "" {
-		return false
-	}
+// validCSRF checks the submitted token against the session-bound expected
+// token (HMAC of the session token). The readable CSRF cookie exists only to
+// let same-origin JS/forms learn the value; it is not what we validate
+// against, so a planted cookie alone no longer forges a valid pair.
+func (m *Manager) validCSRF(r *http.Request, sessionToken string) bool {
 	submitted := r.Header.Get("X-CSRF-Token")
 	if submitted == "" {
 		submitted = r.FormValue("_csrf")
 	}
-	if submitted == "" || len(submitted) != len(cookie.Value) {
+	expected := m.CSRFForSession(sessionToken)
+	if submitted == "" || len(submitted) != len(expected) {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(submitted), []byte(cookie.Value)) == 1
+	return subtle.ConstantTimeCompare([]byte(submitted), []byte(expected)) == 1
+}
+
+func secureRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
