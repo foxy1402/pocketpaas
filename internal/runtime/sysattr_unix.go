@@ -54,6 +54,9 @@ func DisableChroot(reason error) {}
 // ProbeVirtualRoot is unsupported off Linux.
 func ProbeVirtualRoot() bool { return false }
 
+// Demote is a no-op off Linux: prefix mode is the end of the ladder.
+func Demote(reason error) bool { return false }
+
 // SpawnDiagnostics is Linux-only (no /proc or capabilities to report here).
 func SpawnDiagnostics(rootfs string) string { return "" }
 

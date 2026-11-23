@@ -40,8 +40,10 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	rawArgv := append(append([]string{}, app.Entrypoint...), app.Command...)
 	// Isolation ladder: direct chroot when we have CAP_SYS_CHROOT, otherwise
 	// "virtual root" (chroot inside a private user+mount namespace, emulated
-	// uid 0) when unprivileged user namespaces work, else rootfs-prefix mode.
+	// uid 0) when unprivileged user namespaces work, else proot (translated
+	// rootfs, no privileges at all), else rootfs-prefix mode.
 	useChroot := app.RootfsPath != "" && (chrootEnabled.Load() || usernsChrootEnabled.Load())
+	useProot := app.RootfsPath != "" && !useChroot && prootEnabled.Load()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -64,6 +66,38 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 			cmd.Dir = "/"
 		}
 		// Copy DNS files so the app can reach the network inside the chroot.
+		ensureChrootDNS(app.RootfsPath)
+	} else if useProot {
+		// ── proot path (no capabilities, no user namespaces) ─────────────────
+		// proot traces the child with ptrace and rewrites path-resolving
+		// syscalls, so the app sees its rootfs as "/" and runs as a fake uid 0
+		// without any privileges. Unlike prefix mode, absolute paths inside the
+		// image, PT_INTERP, shebang interpreters and subprocess execs all
+		// resolve inside the rootfs — which is what makes glibc images, python
+		// entry points and shell scripts work on a restricted sandbox.
+		guestArgv := append([]string{}, rawArgv...)
+		if !isContainerAbs(guestArgv[0]) {
+			// Bare names ("python3") are resolved against the guest PATH inside
+			// proot, but resolving here keeps the error message useful when the
+			// image does not contain the command at all.
+			if resolved := lookPathInRootfs(guestArgv[0], app.RootfsPath); isContainerAbs(resolved) {
+				guestArgv[0] = resolved
+			}
+		}
+		workDir := "/"
+		if app.WorkDir != "" {
+			workDir = app.WorkDir
+		}
+		// -v -1: quiet (no "proot info:" chatter in the app's log stream).
+		// -0: present the app as uid 0 inside the guest, matching chroot mode.
+		args := []string{"-v", "-1", "-0", "-r", app.RootfsPath, "-w", workDir}
+		for _, bind := range prootBinds() {
+			args = append(args, "-b", bind)
+		}
+		args = append(args, guestArgv...)
+		cmd = exec.CommandContext(ctx, prootBin, args...)
+		// Host-side cwd only has to be reachable; the guest cwd comes from -w.
+		cmd.Dir = app.RootfsPath
 		ensureChrootDNS(app.RootfsPath)
 	} else {
 		// ── Non-chroot / rootfs-prefix path ──────────────────────────────────
@@ -204,14 +238,15 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	// Isolated env — no parent-process variables leak into the app.
 	cmd.Env = buildEnv(app.EnvVars)
 
-	// In non-chroot mode also inject LD_LIBRARY_PATH so that any secondary
-	// dynamic loading (Python's ctypes, Node native addons, dlopen calls)
-	// can find image libraries without going through the linker invocation.
-	// Also rewrite PATH entries with the rootfs prefix so that subprocess
-	// exec calls (#!/usr/bin/env, shell scripts calling bare commands like
-	// pip/npm/node) resolve to host-accessible paths instead of rootfs-
-	// relative paths that don't exist on the host filesystem.
-	if !useChroot && app.RootfsPath != "" {
+	// In non-chroot, non-proot mode also inject LD_LIBRARY_PATH so that any
+	// secondary dynamic loading (Python's ctypes, Node native addons, dlopen
+	// calls) can find image libraries without going through the linker
+	// invocation. Also rewrite PATH entries with the rootfs prefix so that
+	// subprocess exec calls (#!/usr/bin/env, shell scripts calling bare commands
+	// like pip/npm/node) resolve to host-accessible paths instead of rootfs-
+	// relative paths that don't exist on the host filesystem. proot needs none
+	// of this: it translates the paths itself.
+	if !useChroot && !useProot && app.RootfsPath != "" {
 		cmd.Env = injectLibPaths(cmd.Env, app.RootfsPath)
 		cmd.Env = prefixPathEnv(cmd.Env, app.RootfsPath)
 		cmd.Env = appHomeUnderRootfs(cmd.Env, app.RootfsPath)
@@ -249,7 +284,9 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	// For the chroot case the exec.Cmd has no ctx wired in, so we watch the
 	// context ourselves and force-kill the process group when it is cancelled
 	// (cancel is only called from stop(), after the SIGTERM grace period).
-	if useChroot {
+	// proot is wired to the ctx, but killing it alone would leave its traced
+	// grandchildren alive — kill the group instead.
+	if useChroot || useProot {
 		go func() {
 			select {
 			case <-ctx.Done():
@@ -627,6 +664,14 @@ func (p *Process) stop() {
 // wait blocks until the process exits and returns the exit error (nil = clean exit).
 func (p *Process) wait() error {
 	err := p.cmd.Wait()
+	// Sweep the process group after the leader exits. A leader can die while
+	// its children keep running — proot's tracees when the tracer is killed,
+	// npm -> node, or a shell script that backgrounds a server — and they all
+	// inherit the pgid we created with Setpgid. Without this they are
+	// reparented to PID 1 and leak past Stop.
+	if p.cmd.Process != nil {
+		killProcessGroupForce(p.cmd.Process.Pid)
+	}
 	close(p.exited)
 	return err
 }

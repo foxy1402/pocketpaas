@@ -62,6 +62,21 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Hidden healthcheck flag: the runtime image installs no HTTP client, so
+	// the Docker HEALTHCHECK asks the binary itself instead of wget/curl.
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		client := &http.Client{Timeout: 4 * time.Second}
+		resp, err := client.Get("http://127.0.0.1:" + envOrDefault("PORT", "8080") + "/login")
+		if err != nil {
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// Pick the strongest isolation mode available (chroot → virtual root →
 	// rootfs prefix) and log it. Must run after the probe-child branch above:
 	// the probe re-executes this binary, and the child must not probe again.

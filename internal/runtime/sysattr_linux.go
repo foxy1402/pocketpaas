@@ -28,30 +28,149 @@ var chrootEnabled atomic.Bool
 // boot if the environment's policy tightened.
 var usernsChrootEnabled atomic.Bool
 
+// ProotAvailable reports whether the proot binary is installed.
+func ProotAvailable() bool {
+	_, err := os.Stat(prootBin)
+	return err == nil
+}
+
 // InitIsolation probes the strongest available isolation mode once at
 // startup: direct chroot → virtual root (unprivileged user+mount namespace)
-// → rootfs-prefix mode. Call it from main(), never from init(): the
-// virtual-root probe re-executes this binary, and an init-time ladder would
-// run again in the probe child, spawning probe grandchildren recursively
-// until the timeout killed them.
+// → proot → rootfs-prefix mode. Call it from main(), never from init(): the
+// probes re-execute this binary, and an init-time ladder would run again in
+// the probe child, spawning probe grandchildren recursively until the timeout
+// killed them.
 func InitIsolation() {
-	// chroot("/") is a no-op if it succeeds (root stays the same) but
-	// requires CAP_SYS_CHROOT. EPERM means the capability is absent.
-	if err := syscall.Chroot("/"); err == nil {
+	// chroot("/") requires CAP_SYS_CHROOT, so EPERM rules chroot mode out
+	// cheaply. Success is NOT sufficient though: a sandbox can allow chroot(2)
+	// and still deny spawning a child that chroots (observed on managed PaaS
+	// runtimes), so the real test is a chrooted spawn.
+	if err := syscall.Chroot("/"); err != nil {
+		log.Printf("runtime: chroot(2) unavailable (%v) — probing unprivileged user namespaces (virtual root)", err)
+	} else if probeChrootSpawn() {
 		chrootEnabled.Store(true)
 		log.Printf("runtime: chroot(2) available — apps run in direct chroot mode")
 		return
 	} else {
-		log.Printf("runtime: chroot(2) unavailable (%v) — probing unprivileged user namespaces (virtual root)", err)
+		log.Printf("runtime: chroot(2) is permitted but spawning a chrooted child was denied — probing lower tiers")
 	}
 	if probeUsernsChroot() {
 		usernsChrootEnabled.Store(true)
 		log.Printf("runtime: user namespaces available — apps run in virtual-root mode (chroot inside a private user+mount namespace, uid 0 emulated)")
 		return
 	}
-	log.Printf("runtime: user namespaces unavailable — apps will run in rootfs-prefix mode (no filesystem isolation)")
+	if probeProot() {
+		prootEnabled.Store(true)
+		log.Printf("runtime: no chroot and no user namespaces — apps run in proot mode (translated rootfs, fake uid 0, no privileges needed)")
+		return
+	}
+	log.Printf("runtime: proot unavailable — apps will run in rootfs-prefix mode (no filesystem isolation)")
 	log.Printf("runtime: hint: check sysctl kernel.unprivileged_userns_clone / user.max_user_namespaces; Ubuntu 24.04+ AppArmor: kernel.apparmor_restrict_unprivileged_userns=0; Docker's default seccomp profile denies clone(CLONE_NEWUSER) for non-root users (--security-opt seccomp=unconfined lifts it)")
 	log.Printf("runtime: prefix mode only execs binaries that are static or whose ELF interpreter exists on the host — e.g. a glibc image on a musl host will fail to start its binaries")
+}
+
+// probeChrootSpawn performs the exact operation an app start in chroot mode
+// does — clone a child, chroot it into a directory, exec a binary from inside
+// that directory — using a copy of this binary as the payload. chroot("/")
+// alone is not a valid probe: it only proves CAP_SYS_CHROOT, while sandboxes
+// can deny the child's chroot or its execve.
+func probeChrootSpawn() bool {
+	dir, err := os.MkdirTemp("", "pp-chroot-probe-*")
+	if err != nil {
+		log.Printf("runtime: chroot probe skipped: %v", err)
+		return false
+	}
+	defer os.RemoveAll(dir)
+	if err := copyExecutable(dir); err != nil {
+		log.Printf("runtime: chroot probe skipped: %v", err)
+		return false
+	}
+	// 5 s safety net: a policy denial returns immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// exec.Command only calls LookPath for bare names, so "/pp-diag" is passed
+	// through untouched and the kernel resolves it after the child chroots
+	// (the host has no /pp-diag).
+	cmd := exec.CommandContext(ctx, "/pp-diag", "--internal-diag-child")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: dir}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("runtime: chrooted spawn failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		return false
+	}
+	return true
+}
+
+// probeProot checks that proot is installed and that this sandbox lets it
+// trace a child — ptrace permission is the one right a seccomp/LSM policy can
+// still take away, and without it proot cannot operate at all.
+func probeProot() bool {
+	if !ProotAvailable() {
+		return false
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("runtime: proot probe skipped: %v", err)
+		return false
+	}
+	// 10 s: proot startup plus one traced exec.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// -r / keeps path translation an identity mapping. What is under test is
+	// the tracer machinery itself: ptrace attach, syscall rewrite, and exec of
+	// the payload through proot.
+	cmd := exec.CommandContext(ctx, prootBin, "-v", "-1", "-r", "/", exe, "--internal-diag-child")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("runtime: proot probe failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		return false
+	}
+	return true
+}
+
+// EnableProot probes and enables proot mode. Reports whether the tier is (now)
+// active.
+func EnableProot() bool {
+	if prootEnabled.Load() {
+		return true
+	}
+	if !probeProot() {
+		return false
+	}
+	prootEnabled.Store(true)
+	log.Printf("runtime: proot available — apps run in proot mode (translated rootfs, fake uid 0, no privileges needed)")
+	return true
+}
+
+// DisableProot demotes past proot, leaving plain rootfs-prefix mode.
+func DisableProot(reason error) {
+	if prootEnabled.CompareAndSwap(true, false) {
+		log.Printf("runtime: proot mode disabled after spawn failure (%v) — falling back to rootfs-prefix mode", reason)
+	}
+}
+
+// Demote moves one tier down the isolation ladder after an app spawn was
+// denied, so Manager.Start can retry the start. Reports whether the active
+// mode changed; false means the ladder is exhausted (prefix mode) and the
+// start error should be surfaced as-is.
+func Demote(reason error) bool {
+	before := IsolationMode()
+	switch before {
+	case "prefix":
+		return false
+	case "proot":
+		DisableProot(reason)
+	case "virtual-root":
+		DisableUsernsChroot(reason)
+	case "chroot":
+		DisableChroot(reason)
+		ProbeVirtualRoot()
+	}
+	// Everything above prefix failed: try proot before giving up on a rootfs view.
+	if IsolationMode() == "prefix" {
+		EnableProot()
+	}
+	return IsolationMode() != before
 }
 
 // probeUsernsChroot re-executes this binary with --internal-userns-probe,
@@ -115,13 +234,17 @@ func RunUsernsProbe(dir string) error {
 
 // IsolationMode reports the strongest subprocess isolation available:
 // "chroot" (real root / CAP_SYS_CHROOT), "virtual-root" (unprivileged user
-// namespace + chroot), or "prefix" (rootfs path prefixing, no isolation).
+// namespace + chroot), "proot" (ptrace path translation, fake uid 0), or
+// "prefix" (rootfs path prefixing, no isolation).
 func IsolationMode() string {
 	if chrootEnabled.Load() {
 		return "chroot"
 	}
 	if usernsChrootEnabled.Load() {
 		return "virtual-root"
+	}
+	if prootEnabled.Load() {
+		return "proot"
 	}
 	return "prefix"
 }
@@ -208,13 +331,14 @@ func Diagnose(w io.Writer) {
 	fmt.Fprintln(w, "pocketpaas isolation diagnostics")
 	fmt.Fprintln(w, "environment:", SpawnDiagnostics(""))
 
+	// Capability check only — success does not prove a chrooted child can spawn.
 	if err := syscall.Chroot("/"); err != nil {
-		fmt.Fprintf(w, "probe: chroot(/): %v\n", err)
+		fmt.Fprintf(w, "probe: chroot(2) capability: %v\n", err)
 	} else {
-		fmt.Fprintln(w, "probe: chroot(/): ok (CAP_SYS_CHROOT available)")
+		fmt.Fprintln(w, "probe: chroot(2) capability: ok (CAP_SYS_CHROOT present)")
 	}
 
-	// Plain spawn: clone(CLONE_VFORK|CLONE_VM|SIGCHLD) + execve.
+	// Plain spawn: exactly what prefix mode does.
 	spawn := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := spawn.Run(); err != nil {
 		fmt.Fprintf(w, "probe: spawn /bin/sh: %v\n", err)
@@ -223,27 +347,40 @@ func Diagnose(w io.Writer) {
 	}
 
 	// Chrooted spawn: exactly what an app start does in chroot mode.
-	if dir, err := os.MkdirTemp("", "pp-diag-*"); err == nil {
-		defer os.RemoveAll(dir)
-		if err := copyExecutable(dir); err != nil {
-			fmt.Fprintf(w, "probe: chrooted spawn: setup failed: %v\n", err)
-		} else {
-			cmd := exec.Command("/pp-diag", "--internal-diag-child")
-			cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: dir}
-			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(w, "probe: chrooted spawn: %v\n", err)
-			} else {
-				fmt.Fprintln(w, "probe: chrooted spawn: ok")
-			}
-		}
+	chrootOK := probeChrootSpawn()
+	if chrootOK {
+		fmt.Fprintln(w, "probe: chrooted spawn (clone + chroot + execve): ok")
+	} else {
+		fmt.Fprintln(w, "probe: chrooted spawn (clone + chroot + execve): failed")
 	}
 
-	if probeUsernsChroot() {
+	usernsOK := probeUsernsChroot()
+	if usernsOK {
 		fmt.Fprintln(w, "probe: virtual root (clone NEWUSER|NEWNS + chroot): ok")
-		fmt.Fprintln(w, "fallback: virtual-root")
 	} else {
 		fmt.Fprintln(w, "probe: virtual root (clone NEWUSER|NEWNS + chroot): failed")
-		fmt.Fprintln(w, "fallback: prefix (no filesystem isolation)")
+	}
+
+	prootOK := false
+	switch {
+	case !ProotAvailable():
+		fmt.Fprintln(w, "probe: proot: not installed")
+	case probeProot():
+		prootOK = true
+		fmt.Fprintln(w, "probe: proot (ptrace path translation, fake uid 0): ok")
+	default:
+		fmt.Fprintln(w, "probe: proot (ptrace path translation, fake uid 0): failed — ptrace denied")
+	}
+
+	switch {
+	case chrootOK:
+		fmt.Fprintln(w, "expected isolation: chroot")
+	case usernsOK:
+		fmt.Fprintln(w, "expected isolation: virtual-root")
+	case prootOK:
+		fmt.Fprintln(w, "expected isolation: proot")
+	default:
+		fmt.Fprintln(w, "expected isolation: prefix (no filesystem isolation — only static binaries or images whose ELF interpreter exists on the host will start)")
 	}
 }
 

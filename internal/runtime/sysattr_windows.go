@@ -45,6 +45,9 @@ func DisableChroot(reason error) {}
 // ProbeVirtualRoot is unsupported on Windows.
 func ProbeVirtualRoot() bool { return false }
 
+// Demote is a no-op on Windows: prefix mode is the end of the ladder.
+func Demote(reason error) bool { return false }
+
 // SpawnDiagnostics is Linux-only.
 func SpawnDiagnostics(rootfs string) string { return "" }
 
