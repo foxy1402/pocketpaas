@@ -115,6 +115,7 @@ func (m *Manager) StartSweeper(ctx context.Context) {
 				return
 			case <-ticker.C:
 				m.SweepExpired()
+				m.sweepLoginFailures()
 			}
 		}
 	}()
@@ -181,4 +182,20 @@ func (m *Manager) RecordLoginSuccess(key string) {
 	m.limiter.mu.Lock()
 	delete(m.limiter.failures, key)
 	m.limiter.mu.Unlock()
+}
+
+// sweepLoginFailures drops failure entries that are idle past the window and
+// not locked out. Without it the map grows unboundedly: the limiter key comes
+// from client-supplied headers (X-Forwarded-For), so an attacker can mint a
+// new key per request, and entries are otherwise only removed on successful
+// login — which never comes for keys the attacker invented.
+func (m *Manager) sweepLoginFailures() {
+	m.limiter.mu.Lock()
+	defer m.limiter.mu.Unlock()
+	now := time.Now()
+	for key, f := range m.limiter.failures {
+		if now.Sub(f.last) > loginWindowExpiry && !now.Before(f.lockedTo) {
+			delete(m.limiter.failures, key)
+		}
+	}
 }

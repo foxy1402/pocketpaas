@@ -6,6 +6,7 @@ pocketpaas.exe
 
 # Agent tooling
 .agents/
+.zcode/
 
 # Runtime data
 *.db

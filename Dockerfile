@@ -2,8 +2,8 @@
 # Always run on the host (builder) platform.
 # TARGETOS / TARGETARCH are injected by Buildx for the target platform.
 # NOTE: for release builds, pin base images by digest (e.g.
-# golang:1.25.7-alpine@sha256:... and alpine:3.20@sha256:...) so builds are
-# reproducible and immune to upstream tag mutation.
+# golang:1.25.7-alpine@sha256:... and debian:bookworm-slim@sha256:...) so builds
+# are reproducible and immune to upstream tag mutation.
 FROM --platform=$BUILDPLATFORM golang:1.25.7-alpine AS builder
 
 ARG TARGETOS=linux

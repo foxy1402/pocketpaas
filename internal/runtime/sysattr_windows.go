@@ -22,6 +22,11 @@ func setSysProcAttr(_ *exec.Cmd, _ string) {}
 // relies on exec.CommandContext's Cancel killing the leader process;
 // grandchildren (e.g. npm -> node) may be orphaned. Windows is a dev-only
 // platform for this tool, so this limitation is acceptable.
+// signalsSupported reports whether the platform can signal a process group.
+// Windows has no POSIX process groups; the exec.Cmd context is the only
+// teardown path, so Process.stop short-circuits its grace period.
+const signalsSupported = false
+
 func terminateProcessGroup(_ int) {}
 func killProcessGroupForce(_ int) {}
 

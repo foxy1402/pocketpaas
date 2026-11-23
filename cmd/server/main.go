@@ -149,7 +149,7 @@ func main() {
 	}
 
 	// Bootstrap runtime manager.
-	mgr := runtime.NewManager(appStore, dataDir)
+	mgr := runtime.NewManager(appStore)
 
 	// Auth manager (+ background expiry sweep for abandoned sessions).
 	authMgr := auth.NewManager(password)
@@ -226,6 +226,9 @@ func main() {
 
 	log.Printf("pocketpaas %s (built %s) listening on %s (data: %s)", rev, buildTime, addr, dataDir)
 	if err := srvHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// Don't orphan the auto-started apps on a listen failure (e.g. port
+		// already in use): stop everything before exiting.
+		mgr.StopAll()
 		log.Fatalf("listen: %v", err)
 	}
 }

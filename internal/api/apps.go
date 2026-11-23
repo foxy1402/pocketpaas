@@ -79,6 +79,13 @@ func (srv *Server) renderLogin(w http.ResponseWriter, r *http.Request, errMsg st
 }
 
 func (srv *Server) postLogout(w http.ResponseWriter, r *http.Request) {
+	// CSRF-check the logout too: SameSite=Lax has a cross-site top-level POST
+	// allowance, so a forged auto-submitting form could otherwise force a
+	// logout right after login. layout.js attaches _csrf to every POST form.
+	if !auth.ValidLoginCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
 	if token := auth.TokenFromRequest(r); token != "" {
 		srv.auth.DeleteSession(token)
 	}
@@ -139,10 +146,30 @@ func (srv *Server) postUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if existing == nil {
 		return
 	}
+	// Hold the app lock across the update: a concurrent pull's auto-config
+	// writes (entrypoint/cmd/port defaults detected from the image) or a
+	// start's spawn would otherwise race this form edit (lost update / stale
+	// spawn against the old config).
+	unlock, ok := srv.manager.TryLockApp(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "another operation is in progress for this app", http.StatusConflict)
+		return
+	}
+	defer unlock()
 	app, errs := srv.parseAppForm(r, existing)
 	if len(errs) > 0 {
 		srv.render(w, "app_form.html", map[string]any{"App": app, "IsNew": false, "Errors": errs})
 		return
+	}
+	// A changed image ref means the existing rootfs belongs to the old image:
+	// keeping it would run the previous image's filesystem while the dashboard
+	// shows the new one. Clear it so the detail page prompts for a pull first.
+	if app.ImageRef != existing.ImageRef && app.RootfsPath != "" {
+		app.RootfsPath = ""
+		if err := srv.store.UpdateRootfsPath(app.ID, ""); err != nil {
+			srv.serverError(w, err)
+			return
+		}
 	}
 	if err := srv.store.Update(app); err != nil {
 		srv.serverError(w, err)
@@ -499,13 +526,6 @@ func (srv *Server) postRestartApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- Health ----
-
-func (srv *Server) getHealthStatus(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	state := srv.manager.HealthStatus(id)
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":%q}`, state.String())
-}
 
 // ---- Helpers ----
 

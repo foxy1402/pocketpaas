@@ -19,17 +19,17 @@ import (
 
 // Server holds all shared dependencies for the HTTP handlers.
 type Server struct {
-	store       *store.AppStore
-	manager     *runtime.Manager
-	auth        *auth.Manager
-	pages       map[string]*template.Template
-	dataDir     string
-	regCreds    *registry.Credentials
-	sampler     *sysinfo.Sampler
-	tunnel      *tunnel.Manager
-	layers      *registry.LayerCache // on-disk layer cache for pulls (nil-safe)
-	innerMux    *http.ServeMux       // protected routes — built once at startup
-	shutdownCtx context.Context      // cancelled at shutdown; pulls/deploys abort on it
+	store    *store.AppStore
+	manager  *runtime.Manager
+	auth     *auth.Manager
+	pages    map[string]*template.Template
+	dataDir  string
+	regCreds *registry.Credentials
+	sampler  *sysinfo.Sampler
+	layers   *registry.LayerCache // on-disk layer cache for pulls (nil-safe)
+	innerMux *http.ServeMux       // protected routes — built once at startup
+	// shutdownCtx is cancelled at shutdown; pulls/deploys abort on it.
+	shutdownCtx context.Context
 }
 
 // NewServer constructs the Server from its dependencies.
@@ -81,7 +81,6 @@ func NewServer(
 		dataDir:     dataDir,
 		regCreds:    regCreds,
 		sampler:     sampler,
-		tunnel:      tunMgr,
 		layers:      layers,
 		shutdownCtx: shutdownCtx,
 	}
@@ -109,7 +108,8 @@ func (srv *Server) buildProtectedMux() *http.ServeMux {
 	inner.HandleFunc("POST /apps/{id}/stop", srv.postStopApp)
 	inner.HandleFunc("POST /apps/{id}/restart", srv.postRestartApp)
 	inner.HandleFunc("GET /apps/{id}/logs", srv.getLogsSSE)
-	inner.HandleFunc("GET /apps/{id}/health", srv.getHealthStatus)
+	// Note: no GET /apps/{id}/health route — the health badge on the detail
+	// page is rendered server-side and nothing polls a JSON endpoint.
 
 	inner.HandleFunc("GET /portability", srv.getPortability)
 	inner.HandleFunc("GET /portability/export", srv.getExport)

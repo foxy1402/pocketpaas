@@ -22,7 +22,6 @@ import (
 type Process struct {
 	cmd      *exec.Cmd
 	cancel   context.CancelFunc
-	logs     *LogBuffer
 	exited   chan struct{} // closed by wait() once the OS process has exited
 	done     chan struct{} // closed by the manager AFTER removing it from the process registry
 	stopping int32         // atomic; 1 = intentional stop (don't mark as crashed)
@@ -259,7 +258,11 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		cmd.Env = append(cmd.Env, "PROOT_NO_SECCOMP=1")
 	}
 
-	// Platform-specific: process group + optional chroot.
+	// Platform-specific: process group + optional chroot. The snapshot taken
+	// above decides the whole cmd build (Path is a container-abs host path in
+	// chroot mode); passing it down prevents setSysProcAttr from re-loading
+	// the atomics and disagreeing with the snapshot if another app's start
+	// demotes the ladder in between.
 	chrootPath := ""
 	if useChroot {
 		chrootPath = app.RootfsPath
@@ -282,7 +285,7 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		return nil, fmt.Errorf("start process: %w", err)
 	}
 
-	p := &Process{cmd: cmd, cancel: cancel, logs: logs, exited: make(chan struct{}), done: make(chan struct{})}
+	p := &Process{cmd: cmd, cancel: cancel, exited: make(chan struct{}), done: make(chan struct{})}
 
 	// Pipe stdout/stderr into the log buffer.
 	go pipeLines(stdout, logs)
@@ -315,10 +318,14 @@ func buildEnv(appEnv []store.EnvVar) []string {
 	hasHome := false
 	for _, ev := range appEnv {
 		env = append(env, ev.Key+"="+ev.Value)
-		if strings.EqualFold(ev.Key, "PATH") {
+		// Env names are case-sensitive on POSIX: a user-set "Path" must not
+		// suppress the real "PATH" injection (that would break bare-command
+		// lookup, shebangs and subprocess execs). Windows is the case-
+		// insensitive platform.
+		if ev.Key == "PATH" || (goruntime.GOOS == "windows" && strings.EqualFold(ev.Key, "PATH")) {
 			hasPath = true
 		}
-		if strings.EqualFold(ev.Key, "HOME") {
+		if ev.Key == "HOME" || (goruntime.GOOS == "windows" && strings.EqualFold(ev.Key, "HOME")) {
 			hasHome = true
 		}
 	}
@@ -648,6 +655,18 @@ func (p *Process) stop() {
 	p.markStopping()
 	if p.cmd.Process != nil {
 		terminateProcessGroup(p.cmd.Process.Pid)
+	}
+	if !signalsSupported {
+		// Windows: there are no process-group signals (terminateProcessGroup
+		// is a no-op), and the exec.Cmd context is the only kill path — wait
+		// for it instead of burning the 10 s grace on a signal that is never
+		// sent. The app loses graceful shutdown either way on this platform.
+		p.cancel()
+		select {
+		case <-p.exited:
+		case <-time.After(stopKillPeriod):
+		}
+		return
 	}
 	// Grace period: let the app shut down cleanly.
 	select {

@@ -19,3 +19,4 @@ Thumbs.db
 
 # Agent workspace metadata
 .zcode/
+.agents/

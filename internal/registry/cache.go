@@ -125,8 +125,18 @@ func (c *LayerCache) fetch(ctx context.Context, layer v1.Layer) (io.ReadCloser, 
 		return nil, fmt.Errorf("layer %s failed digest verification after download", dg.String())
 	}
 	if err := os.Rename(tmp, final); err != nil {
-		os.Remove(tmp)
-		return nil, fmt.Errorf("publish cached layer: %w", err)
+		// A concurrent pull of the same layer may have renamed its tmp into
+		// place first. POSIX rename replaces it; on Windows the rename fails
+		// while a reader holds the target open. Either way the blob that is
+		// (or was) at `final` is digest-verified — complete by construction —
+		// so use it instead of failing the whole extract.
+		if _, statErr := os.Stat(final); statErr == nil {
+			os.Remove(tmp)
+			log.Printf("layer %s already cached by a concurrent pull — using it", dg.String())
+		} else {
+			os.Remove(tmp)
+			return nil, fmt.Errorf("publish cached layer: %w", err)
+		}
 	}
 
 	lf, err := os.Open(final)

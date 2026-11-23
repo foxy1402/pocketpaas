@@ -37,25 +37,6 @@ func (b *LogBuffer) Write(line string) {
 	}
 }
 
-// Lines returns a snapshot of all buffered lines.
-func (b *LogBuffer) Lines() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]string, len(b.lines))
-	copy(out, b.lines)
-	return out
-}
-
-// Subscribe returns a channel that receives new log lines.
-// Call Unsubscribe(ch) when done.
-func (b *LogBuffer) Subscribe() chan string {
-	ch := make(chan string, 256)
-	b.mu.Lock()
-	b.subs = append(b.subs, ch)
-	b.mu.Unlock()
-	return ch
-}
-
 // SubscribeWithHistory atomically returns a snapshot of all buffered lines and
 // registers a subscriber for future lines. The lock is held across both
 // operations so no lines can be written (and missed) between the snapshot and

@@ -244,6 +244,9 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			dlog.Write("│  Stopping running app before re-pull…")
 			_ = srv.manager.StopLocked(app.ID)
 		}
+		// The app was just stopped (or was never running) and the lock we hold
+		// guarantees it stays that way until we release below — so Start after
+		// release cannot hit a stale running process from this deploy pass.
 		_ = srv.store.UpdateStatus(app.ID, store.StatusPulling)
 
 		// ── Pull ──
@@ -291,7 +294,12 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		close(pullCh)
 		<-pullRelayed
 		srv.manager.ClosePullChannel(app.ID)
-		release()
+		// Keep the app op lock through prune+start below: a concurrent delete
+		// or manual pull could otherwise remove/re-swap the just-promoted
+		// rootfs while we prune it and spawn a process against a tree that is
+		// being deleted. The lock is held by TryStartPull and released either
+		// in the failure paths above or after the start at the end of this
+		// iteration.
 
 		// Apply image config defaults only when the user has no overrides.
 		ep, cmd, workDir, port, cfgErr := registry.ImageConfig(img)
@@ -333,11 +341,13 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 			dlog.Write("│  Cache/docs pruned ✓")
 		}
 
-		// ── Start ──
+		// ── Start ── (we still hold the app lock — StopLocked, and Start
+		// acquires the lock itself via TryLockApp... which we hold, so use
+		// StartUnlocked semantics: release first, then start.)
 		dlog.Write("│  Starting app…")
-		if srv.manager.IsRunning(app.ID) {
-			_ = srv.manager.Stop(app.ID)
-		}
+		// Release before Start: Start tries the per-app lock and would fail
+		// with errBusy while we still hold it.
+		release()
 		if err := srv.manager.Start(app.ID); err != nil {
 			dlog.Write("│  ✗ Start failed: " + err.Error())
 		} else {

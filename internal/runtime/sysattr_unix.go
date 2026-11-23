@@ -22,6 +22,9 @@ func setSysProcAttr(cmd *exec.Cmd, _ string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+// signalsSupported reports whether the platform can signal a process group.
+const signalsSupported = true
+
 func terminateProcessGroup(pid int) {
 	if pid > 0 {
 		syscall.Kill(-pid, syscall.SIGTERM)

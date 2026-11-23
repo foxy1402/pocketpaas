@@ -264,7 +264,8 @@ else
     # NOTE: the pipeline's exit status is head's, so "|| echo <default>" would
     # never fire on curl failure. Capture first, then default empty values.
     GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1)"
-    : "${GO_VERSION:=go1.23.4}"
+    # Fallback must satisfy go.mod (go 1.25.7) when the VERSION query fails.
+    : "${GO_VERSION:=go1.25.7}"
     printf '==> Installing %s...\n' "$GO_VERSION"
     # Target environment is always a Linux container — hardcode linux here.
     curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C "$HOME" -xz

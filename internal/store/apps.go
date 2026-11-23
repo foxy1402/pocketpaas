@@ -206,6 +206,10 @@ func (s *AppStore) Delete(id string) error {
 	return err
 }
 
+// ResetRunningToStopped clears process-dependent statuses at boot. 'pulling'
+// is included because a pull that was interrupted by a crash/restart left the
+// status stuck — the progress SSE then reports "done" on every page visit
+// (no channel exists) and the app detail page reloads forever.
 func (s *AppStore) ResetRunningToStopped() error {
 	_, err := s.db.Exec(`UPDATE apps SET status='stopped' WHERE status='running' OR status='pulling'`)
 	return err

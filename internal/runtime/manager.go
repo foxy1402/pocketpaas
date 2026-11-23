@@ -49,10 +49,9 @@ type Manager struct {
 	opLocks map[string]*sync.Mutex        // appID -> serializes start/stop/pull/delete/deploy
 	deploy  *DeployState                  // non-nil when deploy is active or recently done
 	store   *store.AppStore
-	dataDir string
 }
 
-func NewManager(s *store.AppStore, dataDir string) *Manager {
+func NewManager(s *store.AppStore) *Manager {
 	return &Manager{
 		procs:   make(map[string]*Process),
 		logs:    make(map[string]*LogBuffer),
@@ -61,7 +60,6 @@ func NewManager(s *store.AppStore, dataDir string) *Manager {
 		pingers: make(map[string]context.CancelFunc),
 		opLocks: make(map[string]*sync.Mutex),
 		store:   s,
-		dataDir: dataDir,
 	}
 }
 
@@ -208,13 +206,29 @@ func (m *Manager) Start(appID string) error {
 		// proot → rootfs-prefix — retrying the start at each tier.
 		log.Printf("runtime: spawn of app %s denied in %s mode: %v", appID, IsolationMode(), err)
 		log.Printf("runtime: environment: %s", SpawnDiagnostics(app.RootfsPath))
-		for Demote(err) {
-			log.Printf("runtime: retrying app %s in %s mode", appID, IsolationMode())
+		// Each tier may only be tried once per failure chain: the probes use a
+		// different syscall shape than the app spawn, so a tier can pass its
+		// probe and still fail the app start. Without this memory a tier that
+		// re-enables itself after DisableX (e.g. EnableProot re-probing after
+		// DisableProot) would make the loop spin forever, wedging this app's
+		// operation lock and the HTTP handler.
+		tried := map[string]bool{}
+		for {
+			if !Demote(err) {
+				break
+			}
+			mode := IsolationMode()
+			if tried[mode] {
+				log.Printf("runtime: %s mode already failed for app %s — stopping demotion", mode, appID)
+				break
+			}
+			tried[mode] = true
+			log.Printf("runtime: retrying app %s in %s mode", appID, mode)
 			proc, err = startProcess(app, buf)
 			if err == nil || !isEPERM(err) {
 				break
 			}
-			log.Printf("runtime: %s spawn of app %s denied too: %v", IsolationMode(), appID, err)
+			log.Printf("runtime: %s spawn of app %s denied too: %v", mode, appID, err)
 		}
 	}
 	if err != nil {
@@ -292,9 +306,11 @@ func (m *Manager) StopLocked(appID string) error {
 // so the new process always picks up the latest config.
 func (m *Manager) Restart(appID string) error {
 	if m.IsRunning(appID) {
-		if err := m.Stop(appID); err != nil {
+		if err := m.Stop(appID); err != nil && !strings.Contains(err.Error(), "not running") {
 			return err
 		}
+		// The process can exit between the IsRunning check and Stop; "not
+		// running" is then exactly the state Start needs, so it is not an error.
 	}
 	return m.Start(appID)
 }
@@ -307,16 +323,6 @@ func (m *Manager) IsRunning(appID string) bool {
 	return ok
 }
 
-// PID returns the PID of the running app, or 0.
-func (m *Manager) PID(appID string) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if p, ok := m.procs[appID]; ok {
-		return p.pid()
-	}
-	return 0
-}
-
 // TryStartPull atomically checks whether a pull is already in progress for
 // the app and, if not, registers its progress channel. It also acquires the
 // per-app operation lock for the duration of the pull (returned as the
@@ -324,6 +330,15 @@ func (m *Manager) PID(appID string) int {
 // cannot interleave with the pull+extract. Callers defer ClosePullChannel
 // and the release func.
 func (m *Manager) TryStartPull(appID string) (ch chan string, release func(), ok bool) {
+	// Fast-fail before acquiring the (potentially long-held) operation lock:
+	// a pull in progress is a "busy" condition, not a reason to block the HTTP
+	// handler for up to pullTimeout behind it.
+	m.mu.Lock()
+	_, busy := m.pulls[appID]
+	m.mu.Unlock()
+	if busy {
+		return nil, nil, false
+	}
 	unlock := m.LockApp(appID)
 	m.mu.Lock()
 	if _, busy := m.pulls[appID]; busy {
@@ -410,7 +425,15 @@ func (m *Manager) StartHealthPinger(app *store.App) {
 					}
 				}
 				m.mu.Lock()
-				m.health[app.ID] = state
+				// The app may have been deleted while this goroutine was
+				// between the select and the lock (RemoveApp cancels the
+				// pinger but a tick already in flight can still land here);
+				// without this check a deleted app's health entry would be
+				// resurrected (and recreated on every pinger tick if the ID
+				// were reused).
+				if _, alive := m.pingers[app.ID]; alive {
+					m.health[app.ID] = state
+				}
 				m.mu.Unlock()
 			}
 		}

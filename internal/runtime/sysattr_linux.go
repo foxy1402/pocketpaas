@@ -441,17 +441,23 @@ func copyExecutable(dir string) error {
 }
 
 // setSysProcAttr sets process-group isolation and, when rootfsPath is
-// non-empty, chroots the child — directly when we have CAP_SYS_CHROOT, or
-// inside a fresh user+mount namespace ("virtual root") when we don't:
-// the mapped root has CAP_SYS_CHROOT in its own namespace, so chroot(2)
-// succeeds unprivileged. Go's parent writes the single-entry uid/gid maps
-// while the child is suspended (setgroups denied automatically).
+// non-empty, chroots the child. The caller's chroot-mode snapshot is honoured
+// as-is: direct chroot is signalled by usernsChrootEnabled being false while
+// rootfsPath is non-empty (the direct case), because the cmd was built with
+// container-abs host paths that only resolve once chrooted. Inside a fresh
+// user+mount namespace ("virtual root") the mapped root has CAP_SYS_CHROOT in
+// its own namespace, so chroot(2) succeeds unprivileged; Go's parent writes
+// the single-entry uid/gid maps while the child is suspended (setgroups denied
+// automatically).
+//
+// rootfsPath is the snapshot the caller already used to build the command
+// (container-abs paths, workdir); it is not re-derived here, so the attrs
+// always agree with the rest of the spawn even if another app's start demotes
+// the ladder between the snapshot and this call.
 func setSysProcAttr(cmd *exec.Cmd, rootfsPath string) {
 	a := &syscall.SysProcAttr{Setpgid: true}
 	if rootfsPath != "" {
-		if chrootEnabled.Load() {
-			a.Chroot = rootfsPath
-		} else if usernsChrootEnabled.Load() {
+		if usernsChrootEnabled.Load() {
 			a.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
 			a.UidMappings = []syscall.SysProcIDMap{
 				{ContainerID: 0, HostID: syscall.Getuid(), Size: 1},
@@ -459,11 +465,14 @@ func setSysProcAttr(cmd *exec.Cmd, rootfsPath string) {
 			a.GidMappings = []syscall.SysProcIDMap{
 				{ContainerID: 0, HostID: syscall.Getegid(), Size: 1},
 			}
-			a.Chroot = rootfsPath
 		}
+		a.Chroot = rootfsPath
 	}
 	cmd.SysProcAttr = a
 }
+
+// signalsSupported reports whether the platform can signal a process group.
+const signalsSupported = true
 
 // terminateProcessGroup sends SIGTERM to the entire process group.
 func terminateProcessGroup(pid int) {
