@@ -234,12 +234,12 @@ func sendPullLine(ch chan<- string, msg string) {
 // only on success, swaps it into place. A failed or timed-out extract leaves
 // the previous working rootfs untouched instead of clobbering it with a
 // half-written mix of old and new layers.
-func extractAndSwap(ctx context.Context, img v1.Image, destDir string, ch chan<- string) error {
+func extractAndSwap(ctx context.Context, img v1.Image, destDir string, cache *registry.LayerCache, ch chan<- string) error {
 	staging := destDir + ".staging"
 	old := destDir + ".old"
 	os.RemoveAll(staging)
 
-	if err := registry.Extract(ctx, img, staging, ch); err != nil {
+	if err := registry.Extract(ctx, img, staging, cache, ch); err != nil {
 		os.RemoveAll(staging)
 		return err
 	}
@@ -281,7 +281,7 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 		return
 	}
 
-	if err := extractAndSwap(ctx, img, destDir, ch); err != nil {
+	if err := extractAndSwap(ctx, img, destDir, srv.layers, ch); err != nil {
 		sendPullLine(ch, "ERROR: "+err.Error())
 		_ = srv.store.UpdateStatus(appID, store.StatusError)
 		return
@@ -317,6 +317,7 @@ func (srv *Server) runPull(appID, imageRef, destDir string, existingEP, existing
 
 	_ = srv.store.UpdateRootfsPath(appID, destDir)
 	_ = srv.store.UpdateStatus(appID, store.StatusStopped)
+	srv.layers.Prune() // keep the layer cache under its size cap
 	sendPullLine(ch, "DONE")
 }
 

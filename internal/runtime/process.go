@@ -38,7 +38,10 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	// Copy defensively: append could otherwise write into the store's shared
 	// entrypoint backing array if it has spare capacity.
 	rawArgv := append(append([]string{}, app.Entrypoint...), app.Command...)
-	useChroot := app.RootfsPath != "" && chrootEnabled
+	// Isolation ladder: direct chroot when we have CAP_SYS_CHROOT, otherwise
+	// "virtual root" (chroot inside a private user+mount namespace, emulated
+	// uid 0) when unprivileged user namespaces work, else rootfs-prefix mode.
+	useChroot := app.RootfsPath != "" && (chrootEnabled || usernsChrootEnabled.Load())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -211,6 +214,7 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	if !useChroot && app.RootfsPath != "" {
 		cmd.Env = injectLibPaths(cmd.Env, app.RootfsPath)
 		cmd.Env = prefixPathEnv(cmd.Env, app.RootfsPath)
+		cmd.Env = appHomeUnderRootfs(cmd.Env, app.RootfsPath)
 	}
 
 	// Platform-specific: process group + optional chroot.
@@ -333,6 +337,22 @@ func injectLibPaths(env []string, rootfsPath string) []string {
 		}
 	}
 	return append(env, "LD_LIBRARY_PATH="+extra)
+}
+
+// appHomeUnderRootfs repoints the default HOME (/root) at the app's own
+// rootfs/tmp in prefix (non-chroot) mode. The default belongs to the host
+// filesystem, which a rootless pocketpaas cannot write to — tools that cache
+// in $HOME (pip, npm, Go) would fail. /tmp is recreated world-writable before
+// every start (PruneRootfsKeepDNS) and is the app's own scratch space. A
+// user-specified HOME is left untouched.
+func appHomeUnderRootfs(env []string, rootfsPath string) []string {
+	for i, e := range env {
+		if e == "HOME=/root" {
+			env[i] = "HOME=" + filepath.Join(rootfsPath, "tmp")
+			break
+		}
+	}
+	return env
 }
 
 // prefixPathEnv rewrites every entry in PATH by prepending rootfsPath, so that

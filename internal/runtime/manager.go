@@ -199,6 +199,13 @@ func (m *Manager) Start(appID string) error {
 	}
 
 	proc, err := startProcess(app, buf)
+	if err != nil && IsolationMode() == "virtual-root" && isEPERM(err) {
+		// The boot probe said user namespaces work, but exec-time policy
+		// (seccomp/AppArmor) denied the clone. Self-heal: degrade to
+		// rootfs-prefix mode and retry this start once.
+		DisableUsernsChroot(err)
+		proc, err = startProcess(app, buf)
+	}
 	if err != nil {
 		_ = m.store.UpdateStatus(appID, store.StatusError)
 		return err
@@ -209,6 +216,7 @@ func (m *Manager) Start(appID string) error {
 	m.mu.Unlock()
 	_ = m.store.UpdateStatus(appID, store.StatusRunning)
 	_ = m.store.SetLastStarted(appID)
+	log.Printf("app %s started (isolation: %s, pid %d)", appID, IsolationMode(), proc.pid())
 
 	// Watch the process in a goroutine; update status when it exits.
 	go func() {

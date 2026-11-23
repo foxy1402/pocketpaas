@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -31,12 +32,46 @@ var (
 )
 
 func main() {
+	// Internal probe child — re-executed by runtime at startup to test whether
+	// unprivileged user namespaces allow chroot ("virtual root") on rootless
+	// hosts. Never used during normal server operation.
+	if len(os.Args) > 1 && os.Args[1] == "--internal-userns-probe" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: --internal-userns-probe <dir>")
+			os.Exit(2)
+		}
+		if err := runtime.RunUsernsProbe(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "virtual-root probe failed:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Pick the strongest isolation mode available (chroot → virtual root →
+	// rootfs prefix) and log it. Must run after the probe-child branch above:
+	// the probe re-executes this binary, and the child must not probe again.
+	runtime.InitIsolation()
+
 	password := os.Getenv("DASHBOARD_PASSWORD")
 	if password == "" {
 		log.Fatal("DASHBOARD_PASSWORD environment variable is required")
 	}
 
+	// Resolve the data directory. A rootless container typically inherits
+	// DATA_DIR=/data from the image (or a volume mounted at /data owned by
+	// root), so verify the directory is actually writable instead of only
+	// ensuring it exists — and fall back to a writable location rather than
+	// refusing to boot.
 	dataDir := envOrDefault("DATA_DIR", autoDataDir())
+	if err := ensureWritableDir(dataDir); err != nil {
+		fallback := autoDataDir()
+		if fallback == dataDir || ensureWritableDir(fallback) != nil {
+			log.Fatalf("data dir %s is not writable (%v) and no writable fallback was found — set DATA_DIR to a writable path", dataDir, err)
+		}
+		log.Printf("warn: data dir %s is not writable (%v) — using %s instead (set DATA_DIR to override)", dataDir, err, fallback)
+		dataDir = fallback
+	}
+
 	port := envOrDefault("PORT", "8080")
 
 	ngrokToken := os.Getenv("NGROK_AUTHTOKEN")
@@ -51,6 +86,16 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Fatalf("create data dir %s: %v", dataDir, err)
 	}
+
+	// On-disk layer cache. Defaults to the OS temp dir: ephemeral storage is
+	// plentiful on most free tiers and the cache is wiped on restart, so it
+	// never eats persistent-volume quota. Set CACHE_DIR for a persistent
+	// location, CACHE_MAX_GB to change the eviction cap.
+	layerCache := &registry.LayerCache{
+		Dir:      envOrDefault("CACHE_DIR", filepath.Join(os.TempDir(), "pocketpaas-cache")),
+		MaxBytes: int64(envIntOrDefault("CACHE_MAX_GB", 10)) << 30,
+	}
+	layerCache.Prune() // startup cleanup: stale temp files + over-cap blobs
 
 	// Open SQLite database.
 	dbPath := filepath.Join(dataDir, "apphive.db")
@@ -99,7 +144,7 @@ func main() {
 
 	// Build HTTP server.
 	mux := http.NewServeMux()
-	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler, tunMgr, bgCtx)
+	srv := api.NewServer(appStore, mgr, authMgr, webFS, dataDir, regCreds, sampler, tunMgr, layerCache, bgCtx)
 	srv.RegisterRoutes(mux, webFS)
 	handler := api.SecurityHeaders(mux)
 
@@ -190,18 +235,47 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+func envIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("warn: invalid %s=%q — using default %d", key, v, def)
+	}
+	return def
+}
+
 // autoDataDir picks a writable data directory without requiring configuration.
 // It prefers /data (Docker volume convention), and falls back to
 // ~/.pocketpaas/data (SSH / non-root container scenario).
+// ensureWritableDir creates path if needed and proves it is writable by
+// writing a probe file. MkdirAll alone is not enough: an existing directory
+// owned by another user (e.g. /data from the image or a root-owned volume)
+// makes MkdirAll succeed while every later write fails.
+func ensureWritableDir(path string) error {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(path, ".write-check-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
+}
+
 func autoDataDir() string {
-	// /data is already a directory we can use (Docker volume mount).
-	if err := os.MkdirAll("/data", 0755); err == nil {
+	// /data is the image's Docker volume mount; use it when writable.
+	if ensureWritableDir("/data") == nil {
 		return "/data"
 	}
-	// No write access to / — use the user's home directory instead.
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".pocketpaas", "data")
+	// Rootless runs: fall back to the user's home directory when available.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if p := filepath.Join(home, ".pocketpaas", "data"); ensureWritableDir(p) == nil {
+			return p
+		}
 	}
-	// Last resort: a directory next to wherever we were started from.
-	return "pocketpaas-data"
+	// Last resort: the OS temp dir (ephemeral, but always writable).
+	return filepath.Join(os.TempDir(), "pocketpaas-data")
 }

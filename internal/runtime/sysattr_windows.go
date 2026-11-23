@@ -2,9 +2,16 @@
 
 package runtime
 
-import "os/exec"
+import (
+	"errors"
+	"os/exec"
+	"sync/atomic"
+)
 
 const chrootEnabled = false
+
+// usernsChrootEnabled is never set on Windows; prefix mode is used.
+var usernsChrootEnabled atomic.Bool
 
 func setSysProcAttr(_ *exec.Cmd, _ string) {}
 
@@ -14,3 +21,19 @@ func setSysProcAttr(_ *exec.Cmd, _ string) {}
 // platform for this tool, so this limitation is acceptable.
 func terminateProcessGroup(_ int) {}
 func killProcessGroupForce(_ int) {}
+
+// InitIsolation is a no-op on Windows: prefix mode is the only option.
+func InitIsolation() {}
+
+// RunUsernsProbe is unsupported on Windows.
+func RunUsernsProbe(dir string) error {
+	return errors.New("virtual root (user namespaces) is only supported on Linux")
+}
+
+// IsolationMode is always prefix mode on Windows.
+func IsolationMode() string { return "prefix" }
+
+// DisableUsernsChroot is a no-op on Windows.
+func DisableUsernsChroot(reason error) {}
+
+func isEPERM(err error) bool { return false }

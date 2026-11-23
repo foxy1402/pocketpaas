@@ -43,6 +43,11 @@ COPY --from=builder /build/pocketpaas .
 
 # DATA_DIR is where the SQLite database and extracted rootfs live.
 # Mount a persistent volume here to survive container restarts.
+# Pre-create it owned by an unprivileged uid so `--user 1000` runs (and named
+# volumes mounted here, which inherit the image directory's ownership) work
+# without extra setup. When the runtime is still not writable — e.g. a
+# pre-existing root-owned volume — pocketpaas falls back to a writable path.
+RUN mkdir -p /data && chown 1000:1000 /data
 VOLUME ["/data"]
 ENV DATA_DIR=/data
 ENV PORT=8080

@@ -26,7 +26,10 @@ const (
 // Extract writes the image's flattened filesystem to destDir.
 // It sends progress messages to the progress channel (non-blocking) and
 // aborts early when ctx is cancelled (e.g. the pull timeout fires).
-func Extract(ctx context.Context, img v1.Image, destDir string, progress chan<- string) error {
+// Layers are streamed through the (optional, digest-verified) disk cache —
+// cache hits skip the download entirely; cache misses download into the
+// cache first, then extract from the cached file.
+func Extract(ctx context.Context, img v1.Image, destDir string, cache *LayerCache, progress chan<- string) error {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("create dest dir: %w", err)
 	}
@@ -49,10 +52,14 @@ func Extract(ctx context.Context, img v1.Image, destDir string, progress chan<- 
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("extract cancelled: %w", err)
 		}
-		sendProgress(progress, fmt.Sprintf("Downloading layer %d/%d …", i+1, len(layers)))
-		rc, err := layer.Uncompressed()
+		if cache.Has(layer) {
+			sendProgress(progress, fmt.Sprintf("Layer %d/%d: cached — skipping download", i+1, len(layers)))
+		} else {
+			sendProgress(progress, fmt.Sprintf("Layer %d/%d: downloading…", i+1, len(layers)))
+		}
+		rc, err := cache.fetch(ctx, layer)
 		if err != nil {
-			return fmt.Errorf("uncompress layer %d: %w", i+1, err)
+			return fmt.Errorf("fetch layer %d: %w", i+1, err)
 		}
 		sendProgress(progress, fmt.Sprintf("Extracting layer %d/%d …", i+1, len(layers)))
 		if err := extractTar(ctx, rc, destDir, cleanDest, &total); err != nil {

@@ -275,7 +275,7 @@ func (srv *Server) runSequentialDeploy(ds *runtime.DeployState, appIDs []string,
 		}
 		// Extract into a staging dir and swap atomically, so a failed deploy
 		// never destroys the previous working rootfs.
-		if err := extractAndSwap(pullCtx, img, destDir, pullCh); err != nil {
+		if err := extractAndSwap(pullCtx, img, destDir, srv.layers, pullCh); err != nil {
 			pullCancel()
 			close(pullCh)
 			<-pullRelayed

@@ -78,6 +78,34 @@ docker run -d \
 
 Open `http://localhost:8080` and log in.
 
+### Running the container as a non-root user
+
+The image runs as root by default because `chroot(2)` needs `CAP_SYS_CHROOT`.
+You can run it unprivileged — pocketpaas probes for the strongest fallback
+(see *Subprocess isolation* below):
+
+```bash
+docker run -d \
+  -p 8080:8080 --user 1000:1000 \
+  -e DASHBOARD_PASSWORD=changeme \
+  --security-opt seccomp=unconfined \
+  --name pocketpaas \
+  ghcr.io/foxy1402/pocketpaas:latest
+```
+
+- **`DATA_DIR` works out of the box for uid 1000.** The image pre-owns `/data`
+  for that uid (named volumes mounted there inherit its ownership). For any
+  other uid pocketpaas logs a warning and falls back to
+  `$HOME/.pocketpaas/data` — or the OS temp dir when there is no home.
+  Set `DATA_DIR` (and pre-`chown` the volume) to pin a specific path.
+- **`--security-opt seccomp=unconfined` enables virtual-root mode.** Docker's
+  default seccomp profile denies unprivileged `clone(CLONE_NEWUSER)`, so the
+  probe fails and apps fall back to rootfs-prefix mode — which only execs
+  static binaries or images whose ELF loader exists on the host (e.g. a glibc
+  image will not start on the musl-based Alpine image).
+- Without the seccomp override the dashboard still runs fine; only app
+  isolation and cross-libc image support are reduced.
+
 ---
 
 ## With Persistent Storage
@@ -103,6 +131,8 @@ docker run -d \
 | `DASHBOARD_PASSWORD` | **Yes** | — | Login password for the dashboard |
 | `DATA_DIR` | No | auto | `/data` when writable (Docker); `~/.pocketpaas/data` otherwise |
 | `PORT` | No | `8080` | HTTP listen port |
+| `CACHE_DIR` | No | temp dir | Layer cache location. Defaults to the OS temp dir (ephemeral — wiped on restart, never eats persistent-volume quota); set it to a persistent path to keep the cache across reboots |
+| `CACHE_MAX_GB` | No | `10` | Layer cache eviction cap (oldest blobs pruned first) |
 | `REGISTRY_USER` | No | — | Username for private registry auth |
 | `REGISTRY_PASSWORD` | No | — | Password for private registry auth |
 | `NGROK_AUTHTOKEN` | No | — | Enables a public ngrok tunnel (get free at dashboard.ngrok.com) |
@@ -128,9 +158,14 @@ The database and rootfs directories survive restarts. Apps with
 
 - **App management** — create, edit, delete apps with OCI image references
 - **Image pull** — pulls directly from Docker Hub, GHCR, or any OCI registry
-  (no Docker daemon needed)
-- **Subprocess isolation** — each app runs as a child process with its own
-  isolated env vars; no cross-app env leakage
+  (no Docker daemon needed); layers stream network → disk (no RAM buffering)
+  and are cached digest-verified on disk, so re-pulls skip downloads entirely
+- **Subprocess isolation** — three-tier and self-healing, probed at startup:
+  direct **chroot** when root/CAP_SYS_CHROOT is available; **virtual root**
+  (chroot inside a private user+mount namespace with an emulated uid 0) on
+  rootless hosts that allow user namespaces; rootfs-**prefix** mode otherwise.
+  Apps always see their own isolated env vars; if exec-time policy blocks the
+  virtual root, pocketpaas degrades gracefully to prefix mode
 - **Live log streaming** — last 1000 lines buffered; streamed live via SSE
 - **Health checks** — optional HTTP ping every 15 s; shown as a status dot
 - **Export / Import** — plain JSON backup of all app configs and env vars

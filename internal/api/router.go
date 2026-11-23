@@ -27,8 +27,9 @@ type Server struct {
 	regCreds    *registry.Credentials
 	sampler     *sysinfo.Sampler
 	tunnel      *tunnel.Manager
-	innerMux    *http.ServeMux  // protected routes — built once at startup
-	shutdownCtx context.Context // cancelled at shutdown; pulls/deploys abort on it
+	layers      *registry.LayerCache // on-disk layer cache for pulls (nil-safe)
+	innerMux    *http.ServeMux       // protected routes — built once at startup
+	shutdownCtx context.Context      // cancelled at shutdown; pulls/deploys abort on it
 }
 
 // NewServer constructs the Server from its dependencies.
@@ -41,6 +42,7 @@ func NewServer(
 	regCreds *registry.Credentials,
 	sampler *sysinfo.Sampler,
 	tunMgr *tunnel.Manager,
+	layers *registry.LayerCache,
 	shutdownCtx context.Context,
 ) *Server {
 	funcs := template.FuncMap{
@@ -80,6 +82,7 @@ func NewServer(
 		regCreds:    regCreds,
 		sampler:     sampler,
 		tunnel:      tunMgr,
+		layers:      layers,
 		shutdownCtx: shutdownCtx,
 	}
 	srv.innerMux = srv.buildProtectedMux()

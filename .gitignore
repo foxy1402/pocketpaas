@@ -16,3 +16,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Agent workspace metadata
+.zcode/
