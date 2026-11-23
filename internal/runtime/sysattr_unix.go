@@ -4,14 +4,16 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"os/exec"
 	"sync/atomic"
 	"syscall"
 )
 
-// chrootEnabled is false on non-Linux platforms; startProcess uses host-path
-// prefixing instead.
-const chrootEnabled = false
+// chrootEnabled is never set on non-Linux platforms; startProcess uses
+// host-path prefixing instead.
+var chrootEnabled atomic.Bool
 
 // usernsChrootEnabled is never set outside Linux; prefix mode is used.
 var usernsChrootEnabled atomic.Bool
@@ -45,6 +47,20 @@ func IsolationMode() string { return "prefix" }
 
 // DisableUsernsChroot is a no-op off Linux.
 func DisableUsernsChroot(reason error) {}
+
+// DisableChroot is a no-op off Linux.
+func DisableChroot(reason error) {}
+
+// ProbeVirtualRoot is unsupported off Linux.
+func ProbeVirtualRoot() bool { return false }
+
+// SpawnDiagnostics is Linux-only (no /proc or capabilities to report here).
+func SpawnDiagnostics(rootfs string) string { return "" }
+
+// Diagnose reports that isolation diagnostics are Linux-only.
+func Diagnose(w io.Writer) {
+	fmt.Fprintln(w, "isolation diagnostics are only available on Linux")
+}
 
 func isEPERM(err error) bool {
 	return errors.Is(err, syscall.EPERM)

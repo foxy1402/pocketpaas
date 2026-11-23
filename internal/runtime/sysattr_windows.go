@@ -4,11 +4,14 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"os/exec"
 	"sync/atomic"
 )
 
-const chrootEnabled = false
+// chrootEnabled is never set on Windows; prefix mode is used.
+var chrootEnabled atomic.Bool
 
 // usernsChrootEnabled is never set on Windows; prefix mode is used.
 var usernsChrootEnabled atomic.Bool
@@ -35,5 +38,19 @@ func IsolationMode() string { return "prefix" }
 
 // DisableUsernsChroot is a no-op on Windows.
 func DisableUsernsChroot(reason error) {}
+
+// DisableChroot is a no-op on Windows.
+func DisableChroot(reason error) {}
+
+// ProbeVirtualRoot is unsupported on Windows.
+func ProbeVirtualRoot() bool { return false }
+
+// SpawnDiagnostics is Linux-only.
+func SpawnDiagnostics(rootfs string) string { return "" }
+
+// Diagnose reports that isolation diagnostics are Linux-only.
+func Diagnose(w io.Writer) {
+	fmt.Fprintln(w, "isolation diagnostics are only available on Linux")
+}
 
 func isEPERM(err error) bool { return false }

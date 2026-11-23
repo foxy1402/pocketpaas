@@ -124,6 +124,31 @@ docker run -d \
 
 ---
 
+## Troubleshooting app starts
+
+If the dashboard boots but starting an app fails with
+`start process: fork/exec …: operation not permitted`, the runtime hosting
+pocketpaas is denying the syscalls used to spawn the app child. Some hardened
+container runtimes restrict `clone`/`chroot` in ways the boot probe cannot
+detect (the probe runs in-process; the app child is spawned with a different
+syscall shape — Go uses `clone(CLONE_VFORK|CLONE_VM)` unless a new user
+namespace is requested).
+
+pocketpaas responds by demoting at runtime — chroot → virtual root →
+rootfs-prefix — and logs the security context on failure: `uid`/`euid`,
+`CapEff`, `NoNewPrivs`, `Seccomp`, and the rootfs mount flags.
+
+To see exactly what the environment allows, run inside the container:
+
+```sh
+/app/pocketpaas --diagnose
+```
+
+It probes a plain spawn, a chrooted spawn, and an unprivileged
+user-namespace clone, then prints which fallback tier would be used.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -164,8 +189,9 @@ The database and rootfs directories survive restarts. Apps with
   direct **chroot** when root/CAP_SYS_CHROOT is available; **virtual root**
   (chroot inside a private user+mount namespace with an emulated uid 0) on
   rootless hosts that allow user namespaces; rootfs-**prefix** mode otherwise.
-  Apps always see their own isolated env vars; if exec-time policy blocks the
-  virtual root, pocketpaas degrades gracefully to prefix mode
+  Apps always see their own isolated env vars; if exec-time policy denies a
+  spawn even though the boot probe passed, pocketpaas demotes down the ladder
+  (chroot → virtual root → prefix) and logs the security context
 - **Live log streaming** — last 1000 lines buffered; streamed live via SSE
 - **Health checks** — optional HTTP ping every 15 s; shown as a status dot
 - **Export / Import** — plain JSON backup of all app configs and env vars

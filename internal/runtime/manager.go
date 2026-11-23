@@ -199,12 +199,31 @@ func (m *Manager) Start(appID string) error {
 	}
 
 	proc, err := startProcess(app, buf)
-	if err != nil && IsolationMode() == "virtual-root" && isEPERM(err) {
-		// The boot probe said user namespaces work, but exec-time policy
-		// (seccomp/AppArmor) denied the clone. Self-heal: degrade to
-		// rootfs-prefix mode and retry this start once.
-		DisableUsernsChroot(err)
-		proc, err = startProcess(app, buf)
+	if err != nil && isEPERM(err) && app.RootfsPath != "" {
+		// The boot probe only proves that the probe process can use the
+		// isolation syscalls. The spawned child uses a different syscall shape
+		// (Go clones with CLONE_VFORK|CLONE_VM unless a new user namespace is
+		// requested), so exec-time policy (seccomp/LSM/runtime) can still deny
+		// it. Self-heal: demote down the ladder — chroot → virtual root →
+		// rootfs-prefix — retrying the start at each tier.
+		log.Printf("runtime: spawn of app %s denied in %s mode: %v", appID, IsolationMode(), err)
+		log.Printf("runtime: environment: %s", SpawnDiagnostics(app.RootfsPath))
+		for IsolationMode() != "prefix" {
+			if IsolationMode() == "chroot" {
+				DisableChroot(err)
+				// The userns probe was skipped at boot because chroot passed;
+				// run it now. A failed probe leaves prefix mode active.
+				ProbeVirtualRoot()
+			} else {
+				DisableUsernsChroot(err)
+			}
+			log.Printf("runtime: retrying app %s in %s mode", appID, IsolationMode())
+			proc, err = startProcess(app, buf)
+			if err == nil || !isEPERM(err) {
+				break
+			}
+			log.Printf("runtime: %s spawn of app %s denied too: %v", IsolationMode(), appID, err)
+		}
 	}
 	if err != nil {
 		_ = m.store.UpdateStatus(appID, store.StatusError)

@@ -41,7 +41,7 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 	// Isolation ladder: direct chroot when we have CAP_SYS_CHROOT, otherwise
 	// "virtual root" (chroot inside a private user+mount namespace, emulated
 	// uid 0) when unprivileged user namespaces work, else rootfs-prefix mode.
-	useChroot := app.RootfsPath != "" && (chrootEnabled || usernsChrootEnabled.Load())
+	useChroot := app.RootfsPath != "" && (chrootEnabled.Load() || usernsChrootEnabled.Load())
 
 	ctx, cancel := context.WithCancel(context.Background())
 

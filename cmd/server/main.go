@@ -32,6 +32,12 @@ var (
 )
 
 func main() {
+	// Diagnostics child — spawned by `--diagnose` inside a chroot to prove
+	// that clone+chroot+execve works in this environment. Exits immediately.
+	if len(os.Args) > 1 && os.Args[1] == "--internal-diag-child" {
+		os.Exit(0)
+	}
+
 	// Internal probe child — re-executed by runtime at startup to test whether
 	// unprivileged user namespaces allow chroot ("virtual root") on rootless
 	// hosts. Never used during normal server operation.
@@ -44,6 +50,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "virtual-root probe failed:", err)
 			os.Exit(1)
 		}
+		os.Exit(0)
+	}
+
+	// Hidden support flag: report the isolation capabilities of this
+	// environment (capabilities, seccomp, no_new_privs, mount flags, and
+	// probe results for each ladder tier). Useful when a PaaS runtime denies
+	// app spawns.
+	if len(os.Args) > 1 && os.Args[1] == "--diagnose" {
+		runtime.Diagnose(os.Stdout)
 		os.Exit(0)
 	}
 

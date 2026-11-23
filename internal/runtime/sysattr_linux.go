@@ -6,20 +6,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-// chrootEnabled is set at startup by probing whether CAP_SYS_CHROOT is
-// available. It is true when pocketpaas is running as the container's main
-// process (e.g. via the ghcr Docker image), and false when running inside a
-// restricted PaaS-assigned container reached only by SSH.
-var chrootEnabled bool
+// chrootEnabled tracks whether CAP_SYS_CHROOT is available. Atomic because a
+// spawn failure can demote the mode at runtime (the boot probe only proves the
+// probe process may chroot — not that every spawned child may).
+var chrootEnabled atomic.Bool
 
 // usernsChrootEnabled tracks whether unprivileged user namespaces allow a
 // chroot — the "virtual root" fallback when CAP_SYS_CHROOT is absent. Atomic
@@ -37,7 +38,7 @@ func InitIsolation() {
 	// chroot("/") is a no-op if it succeeds (root stays the same) but
 	// requires CAP_SYS_CHROOT. EPERM means the capability is absent.
 	if err := syscall.Chroot("/"); err == nil {
-		chrootEnabled = true
+		chrootEnabled.Store(true)
 		log.Printf("runtime: chroot(2) available — apps run in direct chroot mode")
 		return
 	} else {
@@ -116,7 +117,7 @@ func RunUsernsProbe(dir string) error {
 // "chroot" (real root / CAP_SYS_CHROOT), "virtual-root" (unprivileged user
 // namespace + chroot), or "prefix" (rootfs path prefixing, no isolation).
 func IsolationMode() string {
-	if chrootEnabled {
+	if chrootEnabled.Load() {
 		return "chroot"
 	}
 	if usernsChrootEnabled.Load() {
@@ -141,6 +142,134 @@ func isEPERM(err error) bool {
 	return errors.Is(err, syscall.EPERM)
 }
 
+// DisableChroot demotes direct-chroot mode after a spawn was denied. The boot
+// probe only proves the probe process may chroot; exec-time policy can still
+// deny the child's clone/chroot/execve, and then the lower tiers are tried.
+func DisableChroot(reason error) {
+	if chrootEnabled.CompareAndSwap(true, false) {
+		log.Printf("runtime: direct chroot mode disabled after spawn failure (%v) — probing lower tiers", reason)
+	}
+}
+
+// ProbeVirtualRoot runs the user-namespace probe on demand (after a chroot
+// spawn failure the boot probe was skipped because chroot succeeded) and
+// enables virtual-root mode when it succeeds. Reports whether virtual-root
+// mode is now active.
+func ProbeVirtualRoot() bool {
+	if chrootEnabled.Load() {
+		return false
+	}
+	if usernsChrootEnabled.Load() {
+		return true
+	}
+	if !probeUsernsChroot() {
+		return false
+	}
+	usernsChrootEnabled.Store(true)
+	log.Printf("runtime: user namespaces available after demotion — apps run in virtual-root mode")
+	return true
+}
+
+// SpawnDiagnostics summarises the security context that decides whether a
+// spawned app child may clone/chroot/execve: identity, effective capability
+// mask, no_new_privs, seccomp mode, and the rootfs mount flags. It is logged
+// when a start fails with EPERM so the denial can be attributed without
+// guesswork.
+func SpawnDiagnostics(rootfs string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "uid=%d euid=%d gid=%d egid=%d", os.Getuid(), os.Geteuid(), os.Getgid(), os.Getegid())
+	if data, err := os.ReadFile("/proc/self/status"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			switch {
+			case strings.HasPrefix(line, "CapEff:"),
+				strings.HasPrefix(line, "NoNewPrivs:"),
+				strings.HasPrefix(line, "Seccomp:"):
+				b.WriteString(" ")
+				b.WriteString(strings.TrimSpace(line))
+			}
+		}
+	}
+	if rootfs != "" {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(rootfs, &st); err == nil {
+			flags := uint64(st.Flags)
+			fmt.Fprintf(&b, " rootfs-mount-flags=0x%x(noexec=%t nosuid=%t ro=%t)",
+				flags, flags&syscall.MS_NOEXEC != 0, flags&syscall.MS_NOSUID != 0, flags&syscall.MS_RDONLY != 0)
+		}
+	}
+	return b.String()
+}
+
+// Diagnose writes a support report about this environment's isolation
+// capabilities (hidden --diagnose flag). Every probe mirrors an operation app
+// starts actually perform, so a denied syscall is visible here instead of
+// surfacing only as "fork/exec …: operation not permitted".
+func Diagnose(w io.Writer) {
+	fmt.Fprintln(w, "pocketpaas isolation diagnostics")
+	fmt.Fprintln(w, "environment:", SpawnDiagnostics(""))
+
+	if err := syscall.Chroot("/"); err != nil {
+		fmt.Fprintf(w, "probe: chroot(/): %v\n", err)
+	} else {
+		fmt.Fprintln(w, "probe: chroot(/): ok (CAP_SYS_CHROOT available)")
+	}
+
+	// Plain spawn: clone(CLONE_VFORK|CLONE_VM|SIGCHLD) + execve.
+	spawn := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := spawn.Run(); err != nil {
+		fmt.Fprintf(w, "probe: spawn /bin/sh: %v\n", err)
+	} else {
+		fmt.Fprintln(w, "probe: spawn /bin/sh: ok")
+	}
+
+	// Chrooted spawn: exactly what an app start does in chroot mode.
+	if dir, err := os.MkdirTemp("", "pp-diag-*"); err == nil {
+		defer os.RemoveAll(dir)
+		if err := copyExecutable(dir); err != nil {
+			fmt.Fprintf(w, "probe: chrooted spawn: setup failed: %v\n", err)
+		} else {
+			cmd := exec.Command("/pp-diag", "--internal-diag-child")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: dir}
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(w, "probe: chrooted spawn: %v\n", err)
+			} else {
+				fmt.Fprintln(w, "probe: chrooted spawn: ok")
+			}
+		}
+	}
+
+	if probeUsernsChroot() {
+		fmt.Fprintln(w, "probe: virtual root (clone NEWUSER|NEWNS + chroot): ok")
+		fmt.Fprintln(w, "fallback: virtual-root")
+	} else {
+		fmt.Fprintln(w, "probe: virtual root (clone NEWUSER|NEWNS + chroot): failed")
+		fmt.Fprintln(w, "fallback: prefix (no filesystem isolation)")
+	}
+}
+
+// copyExecutable places a copy of this binary at dir/pp-diag so a chrooted
+// child can exec it (exec paths resolve inside the chroot).
+func copyExecutable(dir string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(exe)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(filepath.Join(dir, "pp-diag"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
 // setSysProcAttr sets process-group isolation and, when rootfsPath is
 // non-empty, chroots the child — directly when we have CAP_SYS_CHROOT, or
 // inside a fresh user+mount namespace ("virtual root") when we don't:
@@ -150,7 +279,7 @@ func isEPERM(err error) bool {
 func setSysProcAttr(cmd *exec.Cmd, rootfsPath string) {
 	a := &syscall.SysProcAttr{Setpgid: true}
 	if rootfsPath != "" {
-		if chrootEnabled {
+		if chrootEnabled.Load() {
 			a.Chroot = rootfsPath
 		} else if usernsChrootEnabled.Load() {
 			a.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
