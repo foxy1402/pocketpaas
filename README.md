@@ -108,8 +108,13 @@ docker run -d \
   `chroot(2)` and `clone(CLONE_NEWUSER)` — the usual profile of a managed PaaS.
   proot intercepts every syscall, so throughput-heavy apps are noticeably
   slower than in chroot/virtual-root mode, and it requires `ptrace` to be
-  permitted. For bare-metal/SSH installs run `apt-get install proot` to get
-  this tier; otherwise pocketpaas uses rootfs-prefix mode.
+  permitted. If the kernel accepts ptrace but not ptrace's seccomp events
+  (syscall-emulation runtimes, e.g. gVisor-style sandboxes, answer
+  `ptrace option PTRACE_O_TRACESECCOMP not supported yet`), pocketpaas retries
+  proot in classic ptrace mode (`PROOT_NO_SECCOMP=1`) automatically — slower
+  again, but it still works. For bare-metal/SSH installs run
+  `apt-get install proot` to get this tier; otherwise pocketpaas uses
+  rootfs-prefix mode.
 - Without any of these the dashboard still runs fine; only app isolation and
   cross-libc image support are reduced.
 
@@ -160,8 +165,10 @@ To see exactly what the environment allows, run inside the container:
 It probes a plain spawn, a chrooted spawn, a user-namespace clone and proot,
 then prints the tier app starts will use. A sandbox that reports
 `uid=0 … CapEff: 0000000000000000` cannot chroot at all — proot (or prefix
-mode) is the only option there, and if `probe: proot … failed` shows up, the
-runtime blocks `ptrace` too and only static images will run.
+mode) is the only option there, and if `probe: proot … failed` shows up in both
+modes, the runtime blocks `ptrace` too and only static images will run.
+`PROOT_NO_SECCOMP=1` in the container environment forces proot's classic
+(slow) mode if you want to rule out its seccomp acceleration.
 
 ---
 

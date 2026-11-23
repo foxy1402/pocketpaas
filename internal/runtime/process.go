@@ -252,6 +252,13 @@ func startProcess(app *store.App, logs *LogBuffer) (*Process, error) {
 		cmd.Env = appHomeUnderRootfs(cmd.Env, app.RootfsPath)
 	}
 
+	// Some kernels accept ptrace but reject its seccomp events. proot must then
+	// run without its default accelerator; it reads PROOT_NO_SECCOMP from its
+	// own environment before tracing anything.
+	if useProot && prootNoSeccomp.Load() {
+		cmd.Env = append(cmd.Env, "PROOT_NO_SECCOMP=1")
+	}
+
 	// Platform-specific: process group + optional chroot.
 	chrootPath := ""
 	if useChroot {

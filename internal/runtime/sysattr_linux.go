@@ -61,7 +61,7 @@ func InitIsolation() {
 	}
 	if probeProot() {
 		prootEnabled.Store(true)
-		log.Printf("runtime: no chroot and no user namespaces — apps run in proot mode (translated rootfs, fake uid 0, no privileges needed)")
+		log.Printf("runtime: no chroot and no user namespaces — apps run in %s", prootModeDesc())
 		return
 	}
 	log.Printf("runtime: proot unavailable — apps will run in rootfs-prefix mode (no filesystem isolation)")
@@ -104,6 +104,12 @@ func probeChrootSpawn() bool {
 // probeProot checks that proot is installed and that this sandbox lets it
 // trace a child — ptrace permission is the one right a seccomp/LSM policy can
 // still take away, and without it proot cannot operate at all.
+//
+// proot's default accelerator uses ptrace's seccomp events
+// (PTRACE_O_TRACESECCOMP). Syscall-emulation sandboxes accept ptrace but reject
+// that option ("ptrace option PTRACE_O_TRACESECCOMP not supported yet", exit
+// 255), so a failed accelerated probe is retried with PROOT_NO_SECCOMP=1,
+// which falls back to classic syscall-stop tracing.
 func probeProot() bool {
 	if !ProotAvailable() {
 		return false
@@ -113,16 +119,43 @@ func probeProot() bool {
 		log.Printf("runtime: proot probe skipped: %v", err)
 		return false
 	}
-	// 10 s: proot startup plus one traced exec.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Operator override / manual escape hatch: probe classic mode only.
+	if os.Getenv("PROOT_NO_SECCOMP") != "" {
+		if runProotProbe(exe, true) {
+			prootNoSeccomp.Store(true)
+			return true
+		}
+		return false
+	}
+	if runProotProbe(exe, false) {
+		return true
+	}
+	log.Printf("runtime: proot seccomp acceleration unavailable — retrying in classic ptrace mode (PROOT_NO_SECCOMP=1)")
+	if runProotProbe(exe, true) {
+		prootNoSeccomp.Store(true)
+		return true
+	}
+	return false
+}
+
+// runProotProbe traces one exec of this binary through proot (-r / keeps path
+// translation an identity mapping; the tracer machinery is what is under test).
+func runProotProbe(exe string, classic bool) bool {
+	// 20 s: classic mode is noticeably slower to start, and a denied syscall
+	// returns immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	// -r / keeps path translation an identity mapping. What is under test is
-	// the tracer machinery itself: ptrace attach, syscall rewrite, and exec of
-	// the payload through proot.
 	cmd := exec.CommandContext(ctx, prootBin, "-v", "-1", "-r", "/", exe, "--internal-diag-child")
+	if classic {
+		cmd.Env = append(os.Environ(), "PROOT_NO_SECCOMP=1")
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("runtime: proot probe failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		mode := "seccomp-accelerated"
+		if classic {
+			mode = "classic"
+		}
+		log.Printf("runtime: proot probe (%s mode) failed: %v (%s)", mode, err, strings.TrimSpace(string(out)))
 		return false
 	}
 	return true
@@ -138,7 +171,7 @@ func EnableProot() bool {
 		return false
 	}
 	prootEnabled.Store(true)
-	log.Printf("runtime: proot available — apps run in proot mode (translated rootfs, fake uid 0, no privileges needed)")
+	log.Printf("runtime: proot available — apps run in %s", prootModeDesc())
 	return true
 }
 
@@ -367,7 +400,7 @@ func Diagnose(w io.Writer) {
 		fmt.Fprintln(w, "probe: proot: not installed")
 	case probeProot():
 		prootOK = true
-		fmt.Fprintln(w, "probe: proot (ptrace path translation, fake uid 0): ok")
+		fmt.Fprintf(w, "probe: %s: ok\n", prootModeDesc())
 	default:
 		fmt.Fprintln(w, "probe: proot (ptrace path translation, fake uid 0): failed — ptrace denied")
 	}

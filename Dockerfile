@@ -74,5 +74,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD ["/app/pocketpaas", "--healthcheck"]
 
 # tini runs as PID 1 so orphaned app grandchildren are reaped; pocketpaas is its
-# child and handles SIGTERM/SIGINT itself (tini forwards them).
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/pocketpaas"]
+# child and handles SIGTERM/SIGINT itself (tini forwards them). -s registers
+# tini as a child subreaper too, so reaping still works on platforms that wrap
+# the entrypoint and therefore do not give tini PID 1 (it warns otherwise).
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/app/pocketpaas"]

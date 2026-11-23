@@ -15,6 +15,21 @@ import (
 // the Linux build can ever set it.
 var prootEnabled atomic.Bool
 
+// prootNoSeccomp records that proot has to run in classic ptrace mode
+// (PROOT_NO_SECCOMP=1) because the kernel does not support ptrace's seccomp
+// events (PTRACE_O_TRACESECCOMP). Syscall-emulation sandboxes — gVisor-style
+// runtimes, some managed PaaS kernels — accept ptrace but reject that option,
+// which breaks proot's default accelerator.
+var prootNoSeccomp atomic.Bool
+
+// prootModeDesc describes the active proot accelerator for logs and diagnostics.
+func prootModeDesc() string {
+	if prootNoSeccomp.Load() {
+		return "proot mode (translated rootfs, fake uid 0, classic ptrace — slower)"
+	}
+	return "proot mode (translated rootfs, fake uid 0, no privileges needed)"
+}
+
 // prootBin is installed by the pocketpaas image (Debian runtime stage).
 const prootBin = "/usr/bin/proot"
 
